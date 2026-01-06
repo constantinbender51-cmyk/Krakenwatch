@@ -71,12 +71,12 @@
         .clean-table td { padding: 12px 0; border-bottom: 1px solid #f0f0f0; font-family: 'JetBrains Mono', monospace; }
         .clean-table tr:last-child td { border-bottom: none; }
 
-        /* Menu Overlay - MOVED TO LEFT */
+        /* Menu Overlay - BACK TO RIGHT */
         .menu-overlay {
-            position: fixed; top: 0; left: 0; 
+            position: fixed; top: 0; right: 0; 
             width: 250px; height: 100vh; 
-            background: white; border-right: 1px solid #e5e5e5; /* Border on right now */
-            transform: translateX(-100%); /* Start hidden to the left */
+            background: white; border-left: 1px solid #e5e5e5; 
+            transform: translateX(100%); 
             transition: transform 0.3s ease;
             z-index: 100; padding: 40px;
         }
@@ -101,12 +101,12 @@
         <h1 class="brand-text">Primate</h1>
     </div>
 
-    <!-- MOVED TO LEFT: Subtle Menu Trigger -->
-    <div class="fixed top-8 left-6 z-50 cursor-pointer p-2 hover:bg-gray-50 rounded-full" onclick="toggleMenu()">
+    <!-- MOVED BACK TO RIGHT: Subtle Menu Trigger -->
+    <div class="fixed top-8 right-6 z-50 cursor-pointer p-2 hover:bg-gray-50 rounded-full" onclick="toggleMenu()">
         <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-gray-400 hover:text-black transition"><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle><circle cx="5" cy="12" r="1"></circle></svg>
     </div>
 
-    <!-- Menu Overlay (Left) -->
+    <!-- Menu Overlay (Right) -->
     <div class="menu-backdrop" id="menu-backdrop" onclick="toggleMenu()"></div>
     <div class="menu-overlay" id="menu-panel">
         <div class="flex flex-col space-y-6 mt-12">
@@ -296,7 +296,7 @@
 
             symbolsArray.sort((a, b) => b.lastVal - a.lastVal);
 
-            // Render Links - KEEPING ORIGINAL GRID, just adding font-mono to price
+            // Render Links
             const grid = document.getElementById('symbol-links-container');
             if (symbolsArray.length === 0) {
                 grid.innerHTML = '<div class="col-span-full text-center text-gray-300 text-sm font-mono">No data available</div>';
@@ -450,6 +450,5 @@
     </script>
 </body>
 </html>
-
 
 
