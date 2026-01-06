@@ -243,10 +243,22 @@ def fetch_worker():
         sleep_time = max(0, FETCH_INTERVAL - elapsed)
         time.sleep(sleep_time)
 
-# ------------------------------------------------------------------
+#  ------------------------------------------------------------------
 # FLASK WEB APP
 # ------------------------------------------------------------------
 app = Flask(__name__)
+
+# --- ADD THIS BLOCK HERE ---
+# Initialize DB immediately on import so Gunicorn runs it
+with app.app_context():
+    if not os.path.exists(DB_FILE):
+        logger.info("Database file not found. Initializing...")
+        init_db()
+    else:
+        # Run init_db anyway to ensure tables exist (idempotent)
+        init_db()
+# ---------------------------
+
 
 @app.teardown_appcontext
 def close_connection(exception):
