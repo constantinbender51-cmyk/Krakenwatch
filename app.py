@@ -5,6 +5,9 @@ Company Primate - Clinical Backend
 Flask + SQLite + Kraken Futures API
 Targeting Flex Margin Equity specifically for balance tracking.
 Restored full UI routing.
+
+UPDATES:
+- Integrated external 'kraken_futures_api.py' library.
 """
 
 import os
@@ -14,15 +17,18 @@ import json
 import threading
 import sqlite3
 import logging
-import base64
-import hashlib
-import hmac
-import urllib.parse
 from datetime import datetime
 from typing import Dict, Any, Optional
 
-import requests
 from flask import Flask, render_template, jsonify, g
+
+# --- IMPORT EXTERNAL LIBRARY ---
+# Assumes the file provided is named 'kraken_futures_api.py'
+try:
+    from kraken_futures_api import KrakenFuturesApi
+except ImportError:
+    print("CRITICAL: 'kraken_futures_api.py' not found in directory.")
+    sys.exit(1)
 
 # Configure Logging
 logging.basicConfig(
@@ -42,72 +48,6 @@ CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "contact@companyprimate.com")
 
 if not API_KEY or not API_SECRET:
     logger.warning("WARNING: KRAKEN_KEY or KRAKEN_SECRET env vars are missing.")
-
-# ------------------------------------------------------------------
-# API CLIENT
-# ------------------------------------------------------------------
-class KrakenFuturesApi:
-    def __init__(self, api_key: str, api_secret: str, base_url: str = "https://futures.kraken.com") -> None:
-        self.api_key = api_key
-        self.api_secret = api_secret
-        self.base_url = base_url.rstrip("/")
-        self._nonce_counter = 0
-
-    def _create_nonce(self) -> str:
-        if self._nonce_counter > 9_999:
-            self._nonce_counter = 0
-        counter_str = f"{self._nonce_counter:05d}"
-        self._nonce_counter += 1
-        return f"{int(time.time() * 1_000)}{counter_str}"
-
-    def _sign_request(self, endpoint: str, nonce: str, post_data: str = "") -> str:
-        path = endpoint[12:] if endpoint.startswith("/derivatives") else endpoint
-        message = (post_data + nonce + path).encode()
-        sha256_hash = hashlib.sha256(message).digest()
-        secret_decoded = base64.b64decode(self.api_secret)
-        sig = hmac.new(secret_decoded, sha256_hash, hashlib.sha512).digest()
-        return base64.b64encode(sig).decode()
-
-    def _request(self, method: str, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        params = params or {}
-        url = self.base_url + endpoint
-        nonce = self._create_nonce()
-        post_data = ""
-        headers = {
-            "APIKey": self.api_key,
-            "Nonce": nonce,
-            "User-Agent": "Primate-Observatory/3.0",
-        }
-
-        if method.upper() == "POST":
-            post_data = urllib.parse.urlencode(params)
-            headers["Content-Type"] = "application/x-www-form-urlencoded"
-        elif params:
-            url += "?" + urllib.parse.urlencode(params)
-
-        headers["Authent"] = self._sign_request(endpoint, nonce, post_data)
-
-        try:
-            rsp = requests.request(method, url, headers=headers, data=post_data or None, timeout=8)
-            if not rsp.ok:
-                logger.error(f"API Error {rsp.status_code}: {rsp.text}")
-                return {} 
-            return rsp.json()
-        except Exception as e:
-            logger.error(f"Request failed: {e}")
-            return {}
-
-    def get_accounts(self) -> Dict[str, Any]:
-        return self._request("GET", "/derivatives/api/v3/accounts")
-
-    def get_open_positions(self) -> Dict[str, Any]:
-        return self._request("GET", "/derivatives/api/v3/openpositions")
-
-    def get_open_orders(self) -> Dict[str, Any]:
-        return self._request("GET", "/derivatives/api/v3/openorders")
-    
-    def get_tickers(self) -> Dict[str, Any]:
-        return self._request("GET", "/derivatives/api/v3/tickers")
 
 # ------------------------------------------------------------------
 # DATABASE & STORAGE
@@ -215,12 +155,14 @@ def update_current_state(key, data):
 # ------------------------------------------------------------------
 def fetch_worker():
     logger.info("Starting background fetcher...")
+    # Initialize the imported library class
     api = KrakenFuturesApi(API_KEY, API_SECRET)
 
     while True:
         try:
             start_time = time.time()
             
+            # The external library raises RuntimeError on failure, which is caught below.
             accounts_resp = api.get_accounts()
             positions_resp = api.get_open_positions()
             orders_resp = api.get_open_orders()
@@ -293,6 +235,7 @@ def fetch_worker():
             })
 
         except Exception as e:
+            # The new library raises exceptions on API errors; we log them here.
             logger.error(f"Error in fetch loop: {e}", exc_info=True)
 
         elapsed = time.time() - start_time
