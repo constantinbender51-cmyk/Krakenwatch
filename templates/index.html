@@ -20,14 +20,6 @@
                     fontFamily: { 
                         sans: ['Inter', 'sans-serif'],
                         mono: ['JetBrains Mono', 'monospace'] 
-                    },
-                    colors: {
-                        medical: {
-                            text: '#1a1a1a',
-                            subtle: '#888888',
-                            border: '#e5e5e5',
-                            hover: '#f5f5f5'
-                        }
                     }
                 }
             }
@@ -37,57 +29,49 @@
         body { background-color: #ffffff; color: #1a1a1a; font-family: 'Inter', sans-serif; }
         
         /* Clinical Minimalism */
-        .page-container { max-width: 1000px; margin: 0 auto; padding: 120px 20px 40px 20px; }
+        /* UPDATE: Removed horizontal padding (0) so charts hit the edge. */
+        .page-container { max-width: 1000px; margin: 0 auto; padding: 120px 0 40px 0; }
+        
+        /* NEW: Utility to re-add padding to text/tables only */
+        .content-pad { padding-left: 20px; padding-right: 20px; }
         
         /* Typography */
         h1, h2, h3 { font-weight: 400; letter-spacing: -0.02em; }
         
         /* Brand Styling */
         .brand-text {
-            font-weight: 100;
-            font-size: 2.25rem;
-            letter-spacing: 0.4em;
-            text-transform: uppercase;
-            color: #1a1a1a;
+            font-weight: 100; font-size: 2.25rem; letter-spacing: 0.4em;
+            text-transform: uppercase; color: #1a1a1a;
         }
         
         /* Minimal Links */
         .clinical-link { 
-            color: #1a1a1a; 
-            text-decoration: none; 
-            border-bottom: 1px solid #e5e5e5; 
-            padding-bottom: 2px;
-            transition: all 0.2s;
-            cursor: pointer;
-            font-size: 0.9rem;
+            color: #1a1a1a; text-decoration: none; border-bottom: 1px solid #e5e5e5; 
+            padding-bottom: 2px; transition: all 0.2s; cursor: pointer; font-size: 0.9rem;
         }
         .clinical-link:hover { border-bottom-color: #1a1a1a; }
         
-        /* Minimal Table - MONOSPACE DATA */
+        /* Minimal Table */
         .clean-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
         .clean-table th { text-align: left; font-weight: 500; color: #888; padding: 12px 0; border-bottom: 1px solid #e5e5e5; }
         .clean-table td { padding: 12px 0; border-bottom: 1px solid #f0f0f0; font-family: 'JetBrains Mono', monospace; }
         .clean-table tr:last-child td { border-bottom: none; }
 
-        /* Menu Overlay - RIGHT SIDE */
+        /* Menu Overlay */
         .menu-overlay {
-            position: fixed; top: 0; right: 0; 
-            width: 250px; height: 100vh; 
+            position: fixed; top: 0; right: 0; width: 250px; height: 100vh; 
             background: white; border-left: 1px solid #e5e5e5; 
-            transform: translateX(100%); 
-            transition: transform 0.3s ease;
-            z-index: 100; padding: 40px;
+            transform: translateX(100%); transition: transform 0.3s ease; z-index: 100; padding: 40px;
         }
         .menu-overlay.open { transform: translateX(0); }
         .menu-backdrop {
             position: fixed; top: 0; left: 0; width: 100%; height: 100%;
             background: rgba(255,255,255,0.8); backdrop-filter: blur(2px);
-            opacity: 0; pointer-events: none; transition: opacity 0.3s;
-            z-index: 90;
+            opacity: 0; pointer-events: none; transition: opacity 0.3s; z-index: 90;
         }
         .menu-backdrop.open { opacity: 1; pointer-events: auto; }
         
-        /* Hidden classes for SPA - FAST FADE */
+        /* SPA Transitions */
         .view-section { display: none; opacity: 0; transition: opacity 0.15s ease-in-out; }
         .view-section.active { display: block; opacity: 1; }
     </style>
@@ -121,29 +105,30 @@
                 </div>
             </div>
 
-            <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-6" id="symbol-links-container">
+            <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-6 content-pad" id="symbol-links-container">
                 <div class="text-center text-gray-300 text-sm col-span-full font-mono">Loading assets...</div>
             </div>
         </div>
 
         <div id="view-symbol" class="view-section">
-            <div class="mb-8 cursor-pointer text-gray-400 hover:text-black text-sm w-max" onclick="router.navigate('home')">
-                &larr; Back
-            </div>
-            
-            <div class="flex justify-between items-baseline mb-12">
-                <h1 class="text-4xl font-light text-black" id="detail-title">--</h1>
-                <div class="text-xl font-light font-mono" id="detail-pnl">--</div>
+            <div class="content-pad">
+                <div class="mb-8 cursor-pointer text-gray-400 hover:text-black text-sm w-max" onclick="router.navigate('home')">
+                    &larr; Back
+                </div>
+                
+                <div class="flex justify-between items-baseline mb-12">
+                    <h1 class="text-4xl font-light text-black" id="detail-title">--</h1>
+                    <div class="text-xl font-light font-mono" id="detail-pnl">--</div>
+                </div>
             </div>
 
             <div class="mb-12">
-                <h3 class="text-xs uppercase text-gray-400 mb-4 tracking-widest">PnL Performance</h3>
                 <div class="h-[300px] w-full relative">
                     <canvas id="detailChart"></canvas>
                 </div>
             </div>
 
-            <div>
+            <div class="content-pad">
                 <h3 class="text-xs uppercase text-gray-400 mb-4 tracking-widest">Order History</h3>
                 <table class="clean-table">
                     <thead>
@@ -161,31 +146,33 @@
         </div>
 
         <div id="view-balance" class="view-section">
-            <div class="mb-8 text-sm text-gray-400">Portfolio Value</div>
+            <div class="content-pad mb-8 text-sm text-gray-400">Portfolio Value</div>
             <div class="h-[500px] w-full relative">
                 <canvas id="balanceChart"></canvas>
             </div>
         </div>
 
         <div id="view-log" class="view-section">
-            <div class="mb-8 text-sm text-gray-400">System Log</div>
-            <table class="clean-table">
-                <thead>
-                    <tr>
-                        <th>Time</th>
-                        <th>Event</th>
-                        <th>Side</th>
-                        <th>Size</th>
-                        <th>Price</th>
-                    </tr>
-                </thead>
-                <tbody id="log-table-body"></tbody>
-            </table>
-            <div id="log-empty" class="py-12 text-center text-gray-400 font-mono hidden">No events found.</div>
+            <div class="content-pad">
+                <div class="mb-8 text-sm text-gray-400">System Log</div>
+                <table class="clean-table">
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Event</th>
+                            <th>Side</th>
+                            <th>Size</th>
+                            <th>Price</th>
+                        </tr>
+                    </thead>
+                    <tbody id="log-table-body"></tbody>
+                </table>
+                <div id="log-empty" class="py-12 text-center text-gray-400 font-mono hidden">No events found.</div>
+            </div>
         </div>
 
         <div id="view-contact" class="view-section">
-            <div class="flex flex-col items-center justify-center h-[60vh]">
+            <div class="flex flex-col items-center justify-center h-[60vh] content-pad">
                 <div class="text-sm text-gray-400 mb-2">Contact</div>
                 <div class="text-xl font-light font-mono border-b border-gray-200 pb-1" id="contact-email">
                     Loading...
@@ -196,14 +183,12 @@
     </div>
 
     <script>
-        // --- Setup ---
         const fmtUSD = (num) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(num);
 
-        // Clinical Chart Defaults - UPDATED FONT to JetBrains Mono
+        // CONFIG: Stepped Lines + No Scales
         Chart.defaults.font.family = "'JetBrains Mono', monospace";
         Chart.defaults.font.size = 11;
         Chart.defaults.color = '#888';
-        Chart.defaults.plugins.tooltip.enabled = true; 
         Chart.defaults.plugins.tooltip.backgroundColor = 'rgba(255, 255, 255, 0.95)';
         Chart.defaults.plugins.tooltip.titleColor = '#000';
         Chart.defaults.plugins.tooltip.bodyColor = '#444';
@@ -215,8 +200,7 @@
         const minimalChartOptions = {
             responsive: true,
             maintainAspectRatio: false,
-            // REMOVE INTERNAL PADDING
-            layout: { padding: 0 },
+            layout: { padding: 0 }, // INTERNAL PADDING REMOVED
             interaction: { intersect: false, mode: 'index' },
             scales: {
                 x: { 
@@ -224,9 +208,8 @@
                     time: { unit: 'minute' }, 
                     display: false, 
                     grid: { display: false },
-                    // FORCE TO EDGES
                     offset: false,
-                    bounds: 'data' 
+                    bounds: 'data' // FORCE TO EDGES
                 },
                 y: { 
                     display: false, 
@@ -243,7 +226,6 @@
 
         const chartInstances = { home: null, balance: null, detail: null };
 
-        // --- Router & UI ---
         function toggleMenu() {
             document.getElementById('menu-panel').classList.toggle('open');
             document.getElementById('menu-backdrop').classList.toggle('open');
@@ -268,8 +250,6 @@
             }
         };
 
-        // --- Data ---
-
         async function loadHomeData() {
             const chartRes = await fetch('/api/symbols_chart');
             const chartData = await chartRes.json();
@@ -283,10 +263,8 @@
                     invested: investedData.map(pt => ({x: pt.x * 1000, y: pt.y}))
                 };
             });
-
             symbolsArray.sort((a, b) => b.lastVal - a.lastVal);
 
-            // Render Links
             const grid = document.getElementById('symbol-links-container');
             if (symbolsArray.length === 0) {
                 grid.innerHTML = '<div class="col-span-full text-center text-gray-300 text-sm font-mono">No data available</div>';
@@ -304,10 +282,9 @@
                 return {
                     label: item.sym,
                     data: item.invested,
-                    // Minimalist Grayscale variations
                     borderColor: `rgba(0,0,0, ${0.8 - (idx * 0.15)})`, 
                     borderWidth: 2,
-                    stepped: true // THE KEY: Creates the "Missing Hypotenuse" / L-Shape
+                    stepped: true
                 };
             });
 
@@ -333,7 +310,7 @@
                         borderColor: '#000000',
                         borderWidth: 2,
                         fill: false,
-                        stepped: true // THE KEY: Creates the "Missing Hypotenuse" / L-Shape
+                        stepped: true
                     }]
                 },
                 options: minimalChartOptions
@@ -343,7 +320,6 @@
         async function loadLogData() {
             const res = await fetch('/api/status');
             const data = await res.json();
-            
             const history = data.history || [];
             const tbody = document.getElementById('log-table-body');
             
@@ -351,14 +327,12 @@
                 tbody.innerHTML = history.map(item => {
                     const evt = item.event || {};
                     const order = item.order || {};
-                    
                     const time = evt.timestamp || item.timestamp || Date.now();
                     const type = evt.type || 'EVENT';
                     const side = order.direction ? order.direction.toLowerCase() : (order.side || '--');
                     const symbol = order.symbol || '--';
                     const size = order.quantity || order.size || '--';
                     const price = order.limitPrice || order.price || 'MKT';
-                    
                     const sideClass = side === 'buy' ? 'text-green-700' : (side === 'sell' ? 'text-red-700' : 'text-gray-600');
                     
                     return `
@@ -384,18 +358,15 @@
 
         async function loadSymbolData(symbol) {
             document.getElementById('detail-title').innerText = symbol;
-
             const detailRes = await fetch(`/api/symbol_detail/${symbol}`);
             const detail = await detailRes.json();
             
             const history = detail.pnl_history || [];
             const lastPnlValue = history.length > 0 ? history[history.length - 1].y : 0;
-            
             const pnlEl = document.getElementById('detail-pnl');
             pnlEl.innerText = (lastPnlValue >= 0 ? '+' : '') + fmtUSD(lastPnlValue);
             pnlEl.style.color = lastPnlValue >= 0 ? '#1a1a1a' : '#000000'; 
 
-            // Chart
             if (chartInstances.detail) chartInstances.detail.destroy();
             chartInstances.detail = new Chart(document.getElementById('detailChart'), {
                 type: 'line',
@@ -405,13 +376,12 @@
                         borderColor: '#000000',
                         borderWidth: 2,
                         fill: false,
-                        stepped: true // THE KEY: Creates the "Missing Hypotenuse" / L-Shape
+                        stepped: true
                     }]
                 },
                 options: minimalChartOptions
             });
 
-            // Orders
             const ordBody = document.getElementById('detail-orders-body');
             ordBody.innerHTML = detail.orders.map(o => `
                 <tr>
@@ -430,9 +400,7 @@
             document.getElementById('contact-email').innerText = data.email || "";
         }
 
-        // Initialize
         router.navigate('home');
-
     </script>
 </body>
 </html>
