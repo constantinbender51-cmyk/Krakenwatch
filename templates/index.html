@@ -61,7 +61,6 @@
             
             /* Hide the text visually so the background image text shows through, 
                but keep the element for layout/clicking if needed, or just let the image be the brand.
-               User said: "The upper part will replace the Primate text"
             */
             opacity: 0; 
         }
@@ -318,6 +317,7 @@
                     borderColor: `rgba(0,0,0, ${0.8 - (idx * 0.15)})`, 
                     borderWidth: 2,
                     stepped: true
+                    // Multi-line charts usually don't fill to bottom to avoid occlusion
                 };
             });
 
@@ -347,7 +347,11 @@
                         data: points,
                         borderColor: '#000000',
                         borderWidth: 2,
-                        fill: false,
+                        
+                        // Mask the background image below the line using solid white
+                        fill: 'start',      
+                        backgroundColor: '#ffffff', 
+                        
                         stepped: true
                     }]
                 },
@@ -428,7 +432,11 @@
                         data: history.map(d => ({ x: d.x * 1000, y: d.y })),
                         borderColor: '#000000',
                         borderWidth: 2,
-                        fill: false,
+                        
+                        // Mask the background image below the line using solid white
+                        fill: 'start',
+                        backgroundColor: '#ffffff', 
+                        
                         stepped: true
                     }]
                 },
@@ -461,4 +469,5 @@
     </script>
 </body>
 </html>
+
 
