@@ -203,35 +203,41 @@
         Chart.defaults.font.family = "'JetBrains Mono', monospace";
         Chart.defaults.font.size = 11;
         Chart.defaults.color = '#888';
-        Chart.defaults.plugins.tooltip.enabled = true; // Keep tooltips for data inspection
+        Chart.defaults.plugins.tooltip.enabled = true; 
         Chart.defaults.plugins.tooltip.backgroundColor = 'rgba(255, 255, 255, 0.95)';
         Chart.defaults.plugins.tooltip.titleColor = '#000';
         Chart.defaults.plugins.tooltip.bodyColor = '#444';
         Chart.defaults.plugins.tooltip.borderColor = '#e5e5e5';
         Chart.defaults.plugins.tooltip.borderWidth = 1;
         Chart.defaults.plugins.tooltip.padding = 10;
-        Chart.defaults.plugins.tooltip.displayColors = false; // No color squares in tooltip
+        Chart.defaults.plugins.tooltip.displayColors = false; 
         
         const minimalChartOptions = {
             responsive: true,
             maintainAspectRatio: false,
+            // REMOVE INTERNAL PADDING
+            layout: { padding: 0 },
             interaction: { intersect: false, mode: 'index' },
             scales: {
                 x: { 
                     type: 'time', 
                     time: { unit: 'minute' }, 
-                    display: false, // HIDE AXIS COMPLETELY
-                    grid: { display: false }
+                    display: false, 
+                    grid: { display: false },
+                    // FORCE TO EDGES
+                    offset: false,
+                    bounds: 'data' 
                 },
                 y: { 
-                    display: false, // HIDE AXIS COMPLETELY
-                    grid: { display: false }
+                    display: false, 
+                    grid: { display: false },
+                    offset: false 
                 }
             },
             plugins: { legend: { display: false } },
             elements: {
-                point: { radius: 0, hitRadius: 40, hoverRadius: 4 }, // No points, easier hover
-                line: { borderWidth: 2 } // Slightly thicker for structural look
+                point: { radius: 0, hitRadius: 40, hoverRadius: 4 }, 
+                line: { borderWidth: 2 } 
             }
         };
 
@@ -387,7 +393,7 @@
             
             const pnlEl = document.getElementById('detail-pnl');
             pnlEl.innerText = (lastPnlValue >= 0 ? '+' : '') + fmtUSD(lastPnlValue);
-            pnlEl.style.color = lastPnlValue >= 0 ? '#1a1a1a' : '#000000'; // Pure black for negative too in this style? Or keep distinct? keeping distinct for utility.
+            pnlEl.style.color = lastPnlValue >= 0 ? '#1a1a1a' : '#000000'; 
 
             // Chart
             if (chartInstances.detail) chartInstances.detail.destroy();
