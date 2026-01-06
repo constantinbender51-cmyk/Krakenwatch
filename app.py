@@ -254,22 +254,46 @@ def fetch_worker():
             payload = accounts.get('result', accounts) if isinstance(accounts, dict) else accounts
             acc_data = payload.get('accounts', payload) if isinstance(payload, dict) else payload
 
-            acc_list = []
-            if isinstance(acc_data, dict):
-                acc_list = acc_data.values()
-            elif isinstance(acc_data, list):
-                acc_list = acc_data
-
-            for acc in acc_list:
-                if not isinstance(acc, dict): continue
-                bals = acc.get('balances', {})
-                if 'usd' in bals: total_balance += float(bals['usd'])
-                elif 'usdt' in bals: total_balance += float(bals['usdt'])
+            # -- CHANGE: Prioritize 'flex' account extraction as requested --
+            if isinstance(acc_data, dict) and 'flex' in acc_data:
+                # Direct access to flex account
+                flex_acc = acc_data['flex']
                 
-                aux = acc.get('auxiliary', {})
-                val = float(acc.get('marginEquity', aux.get('marginEquity', aux.get('pv', aux.get('equity', 0)))))
-                total_equity += val
-                margin += float(aux.get('usedMargin', 0))
+                # Equity: Try direct field first (marginEquity)
+                total_equity = float(flex_acc.get('marginEquity', 0))
+                
+                # Fallback if 0: try auxiliary
+                if total_equity == 0:
+                    aux = flex_acc.get('auxiliary', {})
+                    total_equity = float(aux.get('marginEquity', aux.get('pv', aux.get('equity', 0))))
+                
+                # Balance
+                bals = flex_acc.get('balances', {})
+                if 'usd' in bals: total_balance = float(bals['usd'])
+                elif 'usdt' in bals: total_balance = float(bals['usdt'])
+                
+                # Margin
+                aux = flex_acc.get('auxiliary', {})
+                margin = float(aux.get('usedMargin', 0))
+
+            else:
+                # Fallback to legacy iteration if 'flex' key not found
+                acc_list = []
+                if isinstance(acc_data, dict):
+                    acc_list = acc_data.values()
+                elif isinstance(acc_data, list):
+                    acc_list = acc_data
+
+                for acc in acc_list:
+                    if not isinstance(acc, dict): continue
+                    bals = acc.get('balances', {})
+                    if 'usd' in bals: total_balance += float(bals['usd'])
+                    elif 'usdt' in bals: total_balance += float(bals['usdt'])
+                    
+                    aux = acc.get('auxiliary', {})
+                    val = float(acc.get('marginEquity', aux.get('marginEquity', aux.get('pv', aux.get('equity', 0)))))
+                    total_equity += val
+                    margin += float(aux.get('usedMargin', 0))
 
             if total_equity == 0 and total_balance > 0:
                 total_equity = total_balance
