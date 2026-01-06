@@ -202,22 +202,42 @@ def fetch_worker():
             total_balance = 0.0
             margin = 0.0
             
+            # Robust account parsing
             if 'accounts' in accounts:
-                for acc in accounts['accounts']:
+                acc_data = accounts['accounts']
+                
+                # Determine if it's a list or dict and get an iterator of OBJECTS
+                if isinstance(acc_data, dict):
+                    acc_iterator = acc_data.values()
+                elif isinstance(acc_data, list):
+                    acc_iterator = acc_data
+                else:
+                    logger.warning(f"Unknown accounts structure type: {type(acc_data)}")
+                    acc_iterator = []
+
+                for acc in acc_iterator:
+                    if not isinstance(acc, dict):
+                        # Skip if the item itself is a string/other
+                        continue
+
+                    # Safe parsing for balances
                     balances = acc.get('balances', {})
-                    if 'usd' in balances:
-                        total_balance += float(balances.get('usd', 0))
-                    elif 'usdt' in balances:
-                        total_balance += float(balances.get('usdt', 0))
+                    if isinstance(balances, dict):
+                        if 'usd' in balances:
+                            total_balance += float(balances.get('usd', 0))
+                        elif 'usdt' in balances:
+                            total_balance += float(balances.get('usdt', 0))
                     
+                    # Safe parsing for auxiliary
                     aux = acc.get('auxiliary', {})
-                    if 'pv' in aux:
-                        total_equity += float(aux.get('pv', 0))
-                    elif 'equity' in aux:
-                        total_equity += float(aux.get('equity', 0))
-                        
-                    if 'usedMargin' in aux:
-                        margin += float(aux.get('usedMargin', 0))
+                    if isinstance(aux, dict):
+                        if 'pv' in aux:
+                            total_equity += float(aux.get('pv', 0))
+                        elif 'equity' in aux:
+                            total_equity += float(aux.get('equity', 0))
+                            
+                        if 'usedMargin' in aux:
+                            margin += float(aux.get('usedMargin', 0))
 
             if total_equity == 0 and total_balance > 0:
                 total_equity = total_balance
@@ -233,11 +253,18 @@ def fetch_worker():
                 'balance': total_balance,
                 'margin': margin
             })
+            
+            # Count positions safely
+            pos_count = 0
+            if isinstance(positions, dict):
+                p_list = positions.get('openPositions', [])
+                if isinstance(p_list, list):
+                    pos_count = len(p_list)
 
-            logger.info(f"Updated. Eq: ${total_equity:.2f} | Pos: {len(positions.get('openPositions', []))}")
+            logger.info(f"Updated. Eq: ${total_equity:.2f} | Pos: {pos_count}")
 
         except Exception as e:
-            logger.error(f"Error in fetch loop: {e}")
+            logger.error(f"Error in fetch loop: {e}", exc_info=True)
 
         elapsed = time.time() - start_time
         sleep_time = max(0, FETCH_INTERVAL - elapsed)
