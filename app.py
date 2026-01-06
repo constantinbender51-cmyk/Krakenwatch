@@ -336,25 +336,29 @@ def api_status():
 def api_balance_history():
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT timestamp, total_equity FROM account_history ORDER BY id DESC LIMIT 2000")
+    # No limit, full history
+    cur.execute("SELECT timestamp, total_equity FROM account_history ORDER BY id ASC")
     rows = cur.fetchall()
-    return jsonify([{'time': r['timestamp'], 'equity': r['total_equity']} for r in reversed(rows)])
+    return jsonify([{'time': r['timestamp'], 'equity': r['total_equity']} for r in rows])
 
 @app.route('/api/symbols_chart')
 def api_symbols_chart():
-    """Get history for all ever traded symbols"""
+    """Get history for all ever traded symbols, NO LIMITS, two distinct datasets"""
     conn = get_db()
     cur = conn.cursor()
-    # Fetch last 5000 points of symbol data
-    cur.execute("SELECT timestamp, symbol, value_usd FROM symbol_history ORDER BY id DESC LIMIT 5000")
+    
+    # Fetch all data, no LIMIT
+    cur.execute("SELECT timestamp, symbol, value_usd, pnl_usd FROM symbol_history ORDER BY id ASC")
     rows = cur.fetchall()
     
     result = {}
-    for row in reversed(rows):
+    for row in rows:
         sym = row['symbol']
         if sym not in result:
-            result[sym] = []
-        result[sym].append({'x': row['timestamp'], 'y': row['value_usd']})
+            result[sym] = {'invested': [], 'pnl': []}
+            
+        result[sym]['invested'].append({'x': row['timestamp'], 'y': row['value_usd']})
+        result[sym]['pnl'].append({'x': row['timestamp'], 'y': row['pnl_usd']})
     
     return jsonify(result)
 
@@ -364,11 +368,11 @@ def api_symbol_detail(symbol):
     cur = conn.cursor()
     
     cur.execute(
-        "SELECT timestamp, pnl_usd FROM symbol_history WHERE symbol = ? ORDER BY id DESC LIMIT 1000", 
+        "SELECT timestamp, pnl_usd FROM symbol_history WHERE symbol = ? ORDER BY id ASC", 
         (symbol,)
     )
     pnl_rows = cur.fetchall()
-    pnl_history = [{'x': r['timestamp'], 'y': r['pnl_usd']} for r in reversed(pnl_rows)]
+    pnl_history = [{'x': r['timestamp'], 'y': r['pnl_usd']} for r in pnl_rows]
     
     cur.execute("SELECT data FROM current_state WHERE key = 'orders'")
     row = cur.fetchone()
