@@ -5,13 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Primate | Observatory</title>
     
-    <!-- Libraries -->
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/luxon"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon"></script>
     
-    <!-- Fonts: Inter (UI) & JetBrains Mono (Data) -->
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@100;200;300;400;500;600&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 
@@ -65,7 +63,7 @@
         }
         .clinical-link:hover { border-bottom-color: #1a1a1a; }
         
-        /* Minimal Table - NOW WITH MONOSPACE DATA */
+        /* Minimal Table - MONOSPACE DATA */
         .clean-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
         .clean-table th { text-align: left; font-weight: 500; color: #888; padding: 12px 0; border-bottom: 1px solid #e5e5e5; }
         .clean-table td { padding: 12px 0; border-bottom: 1px solid #f0f0f0; font-family: 'JetBrains Mono', monospace; }
@@ -96,17 +94,14 @@
 </head>
 <body class="antialiased min-h-screen">
 
-    <!-- Brand Header (Fixed Top Center) -->
     <div class="fixed top-8 left-1/2 transform -translate-x-1/2 z-50 cursor-pointer select-none" onclick="router.navigate('home')">
         <h1 class="brand-text">Primate</h1>
     </div>
 
-    <!-- Menu Trigger (Right Side - Dots) -->
     <div class="fixed top-8 right-6 z-50 cursor-pointer p-2 hover:bg-gray-50 rounded-full" onclick="toggleMenu()">
         <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-gray-400 hover:text-black transition"><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle><circle cx="5" cy="12" r="1"></circle></svg>
     </div>
 
-    <!-- Menu Overlay (Right) -->
     <div class="menu-backdrop" id="menu-backdrop" onclick="toggleMenu()"></div>
     <div class="menu-overlay" id="menu-panel">
         <div class="flex flex-col space-y-6 mt-12">
@@ -119,23 +114,18 @@
 
     <div class="page-container">
 
-        <!-- VIEW: HOME (Main Page) -->
         <div id="view-home" class="view-section active">
-            <!-- Chart Container -->
             <div class="mb-12">
                 <div class="h-[400px] w-full relative">
                     <canvas id="homeChart"></canvas>
                 </div>
             </div>
 
-            <!-- Symbol Links -->
             <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-6" id="symbol-links-container">
-                <!-- Injected Links -->
                 <div class="text-center text-gray-300 text-sm col-span-full font-mono">Loading assets...</div>
             </div>
         </div>
 
-        <!-- VIEW: SYMBOL DETAIL -->
         <div id="view-symbol" class="view-section">
             <div class="mb-8 cursor-pointer text-gray-400 hover:text-black text-sm w-max" onclick="router.navigate('home')">
                 &larr; Back
@@ -143,7 +133,6 @@
             
             <div class="flex justify-between items-baseline mb-12">
                 <h1 class="text-4xl font-light text-black" id="detail-title">--</h1>
-                <!-- MONOSPACE PNL - Now shows Value instead of 'Closed' -->
                 <div class="text-xl font-light font-mono" id="detail-pnl">--</div>
             </div>
 
@@ -171,7 +160,6 @@
             </div>
         </div>
 
-        <!-- VIEW: BALANCE -->
         <div id="view-balance" class="view-section">
             <div class="mb-8 text-sm text-gray-400">Portfolio Value</div>
             <div class="h-[500px] w-full relative">
@@ -179,7 +167,6 @@
             </div>
         </div>
 
-        <!-- VIEW: LOG -->
         <div id="view-log" class="view-section">
             <div class="mb-8 text-sm text-gray-400">System Log</div>
             <table class="clean-table">
@@ -197,7 +184,6 @@
             <div id="log-empty" class="py-12 text-center text-gray-400 font-mono hidden">No events found.</div>
         </div>
 
-        <!-- VIEW: CONTACT -->
         <div id="view-contact" class="view-section">
             <div class="flex flex-col items-center justify-center h-[60vh]">
                 <div class="text-sm text-gray-400 mb-2">Contact</div>
@@ -209,7 +195,6 @@
 
     </div>
 
-    <!-- Logic -->
     <script>
         // --- Setup ---
         const fmtUSD = (num) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(num);
@@ -218,13 +203,14 @@
         Chart.defaults.font.family = "'JetBrains Mono', monospace";
         Chart.defaults.font.size = 11;
         Chart.defaults.color = '#888';
-        Chart.defaults.scale.grid.color = '#f5f5f5';
+        Chart.defaults.plugins.tooltip.enabled = true; // Keep tooltips for data inspection
         Chart.defaults.plugins.tooltip.backgroundColor = 'rgba(255, 255, 255, 0.95)';
         Chart.defaults.plugins.tooltip.titleColor = '#000';
         Chart.defaults.plugins.tooltip.bodyColor = '#444';
         Chart.defaults.plugins.tooltip.borderColor = '#e5e5e5';
         Chart.defaults.plugins.tooltip.borderWidth = 1;
         Chart.defaults.plugins.tooltip.padding = 10;
+        Chart.defaults.plugins.tooltip.displayColors = false; // No color squares in tooltip
         
         const minimalChartOptions = {
             responsive: true,
@@ -233,20 +219,19 @@
             scales: {
                 x: { 
                     type: 'time', 
-                    time: { unit: 'minute', displayFormats: { minute: 'HH:mm' } }, 
-                    grid: { display: false },
-                    border: { display: false }
+                    time: { unit: 'minute' }, 
+                    display: false, // HIDE AXIS COMPLETELY
+                    grid: { display: false }
                 },
                 y: { 
-                    grid: { color: '#f5f5f5', borderDash: [4, 4] },
-                    border: { display: false },
-                    position: 'right'
+                    display: false, // HIDE AXIS COMPLETELY
+                    grid: { display: false }
                 }
             },
             plugins: { legend: { display: false } },
             elements: {
-                point: { radius: 0, hitRadius: 20 },
-                line: { borderWidth: 1.5 }
+                point: { radius: 0, hitRadius: 40, hoverRadius: 4 }, // No points, easier hover
+                line: { borderWidth: 2 } // Slightly thicker for structural look
             }
         };
 
@@ -262,7 +247,6 @@
             navigate: (page, param = null) => {
                 document.querySelectorAll('.view-section').forEach(el => {
                     el.classList.remove('active');
-                    // FAST FADE: Reduced to 150ms
                     setTimeout(() => { if(!el.classList.contains('active')) el.style.display = 'none'; }, 150);
                 });
 
@@ -314,9 +298,10 @@
                 return {
                     label: item.sym,
                     data: item.invested,
-                    borderColor: `hsl(0, 0%, ${Math.max(0, idx * 10)}%)`, 
-                    borderWidth: 1.5,
-                    tension: 0
+                    // Minimalist Grayscale variations
+                    borderColor: `rgba(0,0,0, ${0.8 - (idx * 0.15)})`, 
+                    borderWidth: 2,
+                    stepped: true // THE KEY: Creates the "Missing Hypotenuse" / L-Shape
                 };
             });
 
@@ -339,10 +324,10 @@
                 data: {
                     datasets: [{
                         data: points,
-                        borderColor: '#1a1a1a',
-                        borderWidth: 1.5,
+                        borderColor: '#000000',
+                        borderWidth: 2,
                         fill: false,
-                        tension: 0
+                        stepped: true // THE KEY: Creates the "Missing Hypotenuse" / L-Shape
                     }]
                 },
                 options: minimalChartOptions
@@ -394,20 +379,15 @@
         async function loadSymbolData(symbol) {
             document.getElementById('detail-title').innerText = symbol;
 
-            // FETCH DATA FIRST to resolve the "Closed" vs Chart mismatch
             const detailRes = await fetch(`/api/symbol_detail/${symbol}`);
             const detail = await detailRes.json();
             
-            // Get PnL History from detail (The chart data)
             const history = detail.pnl_history || [];
-            // Use the last value of the chart as the display value, so they match
             const lastPnlValue = history.length > 0 ? history[history.length - 1].y : 0;
             
             const pnlEl = document.getElementById('detail-pnl');
-            
-            // Set Text
             pnlEl.innerText = (lastPnlValue >= 0 ? '+' : '') + fmtUSD(lastPnlValue);
-            pnlEl.style.color = lastPnlValue >= 0 ? '#1a1a1a' : '#ef4444';
+            pnlEl.style.color = lastPnlValue >= 0 ? '#1a1a1a' : '#000000'; // Pure black for negative too in this style? Or keep distinct? keeping distinct for utility.
 
             // Chart
             if (chartInstances.detail) chartInstances.detail.destroy();
@@ -416,10 +396,10 @@
                 data: {
                     datasets: [{
                         data: history.map(d => ({ x: d.x * 1000, y: d.y })),
-                        borderColor: '#1a1a1a',
-                        borderWidth: 1.5,
+                        borderColor: '#000000',
+                        borderWidth: 2,
                         fill: false,
-                        tension: 0
+                        stepped: true // THE KEY: Creates the "Missing Hypotenuse" / L-Shape
                     }]
                 },
                 options: minimalChartOptions
@@ -450,5 +430,3 @@
     </script>
 </body>
 </html>
-
-
