@@ -100,7 +100,6 @@
     <div class="page-container">
 
         <!-- VIEW: HOME (Main Page) -->
-        <!-- "On the main page: A chart ... A link to each symbol page... nothing else." -->
         <div id="view-home" class="view-section active">
             <!-- Chart Container -->
             <div class="mb-12">
@@ -261,33 +260,44 @@
         // --- Data ---
 
         async function loadHomeData() {
-            // 1. Fetch Status for "All Ever Traded" logic (Actually active positions + history)
-            // Ideally we get a list of all symbols from the chart API keys
             const chartRes = await fetch('/api/symbols_chart');
             const chartData = await chartRes.json();
-            const symbols = Object.keys(chartData);
+            
+            // Convert to array and sort by latest invested value
+            const symbolsArray = Object.keys(chartData).map(sym => {
+                const investedData = chartData[sym].invested || [];
+                const lastVal = investedData.length > 0 ? investedData[investedData.length - 1].y : 0;
+                return {
+                    sym,
+                    lastVal,
+                    invested: investedData.map(pt => ({x: pt.x * 1000, y: pt.y}))
+                };
+            });
+
+            // SORT: Highest position size first
+            symbolsArray.sort((a, b) => b.lastVal - a.lastVal);
 
             // Render Links (Clean Grid)
             const grid = document.getElementById('symbol-links-container');
-            if (symbols.length === 0) {
+            if (symbolsArray.length === 0) {
                 grid.innerHTML = '<div class="col-span-full text-center text-gray-300 text-sm">No data available</div>';
             } else {
-                grid.innerHTML = symbols.map(sym => `
-                    <div onclick="router.navigate('symbol', '${sym}')" 
+                grid.innerHTML = symbolsArray.map(item => `
+                    <div onclick="router.navigate('symbol', '${item.sym}')" 
                          class="text-center py-4 border border-transparent hover:border-gray-100 rounded cursor-pointer transition text-sm text-gray-600 hover:text-black">
-                        ${sym}
+                        <div class="font-medium">${item.sym}</div>
+                        <div class="text-xs text-gray-400 mt-1">${fmtUSD(item.lastVal)}</div>
                     </div>
                 `).join('');
             }
 
-            // Render Chart
-            const datasets = symbols.map((sym, idx) => {
-                // Clinical palette: Black, Grays, maybe one Blue
+            // Render Chart (Position Size USD)
+            const datasets = symbolsArray.map((item, idx) => {
                 return {
-                    label: sym,
-                    data: chartData[sym].map(pt => ({x: pt.x * 1000, y: pt.y})),
-                    borderColor: '#1a1a1a', // All black lines for strict minimalism? Or very subtle differences.
-                    // Let's use opacity to distinguish or very dark greys
+                    label: item.sym,
+                    data: item.invested,
+                    borderColor: '#1a1a1a', 
+                    // Keep existing color logic as requested
                     borderColor: `hsl(0, 0%, ${Math.max(0, idx * 10)}%)`, 
                     borderWidth: 1.5,
                     tension: 0
