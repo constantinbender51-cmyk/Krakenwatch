@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kraken Observatory</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/luxon"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon"></script>
+
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        gray: {
+                            900: '#111827',
+                            800: '#1f2937',
+                            700: '#374151',
+                        },
+                        kraken: {
+                            purple: '#5841D8',
+                            blue: '#008FFB'
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        body { background-color: #0b0e11; color: #e5e7eb; }
+        .card { background-color: #15191e; border: 1px solid #2d3748; }
+        .table-th { @apply px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider; }
+        .table-td { @apply px-6 py-4 whitespace-nowrap text-sm text-gray-300; }
+        tr:nth-child(even) { background-color: #1a202c; }
+    </style>
+</head>
+<body class="antialiased min-h-screen flex flex-col font-sans">
+
+    <!-- Header -->
+    <header class="bg-gray-900 border-b border-gray-800 p-4 sticky top-0 z-50">
+        <div class="container mx-auto flex justify-between items-center">
+            <div class="flex items-center space-x-3">
+                <div class="h-8 w-8 bg-kraken-purple rounded-lg flex items-center justify-center font-bold text-white">K</div>
+                <h1 class="text-xl font-bold tracking-tight">Kraken <span class="text-kraken-blue font-light">Observatory</span></h1>
+            </div>
+            <div class="flex items-center space-x-4">
+                <div class="text-xs text-gray-500">
+                    Last Update: <span id="last-update-time" class="text-white">Connecting...</span>
+                </div>
+                <div class="h-2 w-2 rounded-full bg-green-500 animate-pulse" id="status-indicator"></div>
+            </div>
+        </div>
+    </header>
+
+    <main class="container mx-auto p-4 flex-grow space-y-6">
+        
+        <!-- Key Metrics -->
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <div class="card rounded-xl p-5 shadow-lg">
+                <h3 class="text-gray-500 text-sm font-medium uppercase">Portfolio Equity</h3>
+                <div class="mt-2 flex items-baseline">
+                    <span class="text-3xl font-bold text-white" id="val-equity">--</span>
+                    <span class="ml-2 text-sm text-gray-400">USD</span>
+                </div>
+            </div>
+            <div class="card rounded-xl p-5 shadow-lg">
+                <h3 class="text-gray-500 text-sm font-medium uppercase">Cash Balance</h3>
+                <div class="mt-2 flex items-baseline">
+                    <span class="text-2xl font-semibold text-gray-200" id="val-balance">--</span>
+                </div>
+            </div>
+            <div class="card rounded-xl p-5 shadow-lg">
+                <h3 class="text-gray-500 text-sm font-medium uppercase">Margin Used</h3>
+                <div class="mt-2 flex items-baseline">
+                    <span class="text-2xl font-semibold text-gray-200" id="val-margin">--</span>
+                </div>
+            </div>
+            <div class="card rounded-xl p-5 shadow-lg">
+                <h3 class="text-gray-500 text-sm font-medium uppercase">Open Positions</h3>
+                <div class="mt-2 flex items-baseline">
+                    <span class="text-2xl font-semibold text-white" id="val-pos-count">--</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Chart Section -->
+        <div class="card rounded-xl p-5 shadow-lg">
+            <h3 class="text-gray-400 text-sm font-medium mb-4">Equity History (Last Hour)</h3>
+            <div class="relative h-64 w-full">
+                <canvas id="equityChart"></canvas>
+            </div>
+        </div>
+
+        <!-- Tables Grid -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            
+            <!-- Positions -->
+            <div class="card rounded-xl overflow-hidden shadow-lg">
+                <div class="bg-gray-800 px-6 py-4 border-b border-gray-700">
+                    <h3 class="text-lg font-medium text-white">Open Positions</h3>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="min-w-full divide-y divide-gray-700">
+                        <thead class="bg-gray-900">
+                            <tr>
+                                <th class="table-th">Symbol</th>
+                                <th class="table-th">Side</th>
+                                <th class="table-th">Size</th>
+                                <th class="table-th">Entry</th>
+                                <th class="table-th">Mark</th>
+                                <th class="table-th">PnL</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-gray-800" id="positions-body">
+                            <!-- Rows injected via JS -->
+                        </tbody>
+                    </table>
+                    <div id="positions-empty" class="p-6 text-center text-gray-500 text-sm hidden">No open positions</div>
+                </div>
+            </div>
+
+            <!-- Orders -->
+            <div class="card rounded-xl overflow-hidden shadow-lg">
+                <div class="bg-gray-800 px-6 py-4 border-b border-gray-700">
+                    <h3 class="text-lg font-medium text-white">Open Orders</h3>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="min-w-full divide-y divide-gray-700">
+                        <thead class="bg-gray-900">
+                            <tr>
+                                <th class="table-th">Time</th>
+                                <th class="table-th">Symbol</th>
+                                <th class="table-th">Type</th>
+                                <th class="table-th">Size</th>
+                                <th class="table-th">Price</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-gray-800" id="orders-body">
+                            <!-- Rows injected via JS -->
+                        </tbody>
+                    </table>
+                    <div id="orders-empty" class="p-6 text-center text-gray-500 text-sm hidden">No open orders</div>
+                </div>
+            </div>
+
+        </div>
+    </main>
+
+    <!-- App Logic -->
+    <script>
+        // Chart Initialization
+        const ctx = document.getElementById('equityChart').getContext('2d');
+        const equityChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                datasets: [{
+                    label: 'Equity',
+                    data: [],
+                    borderColor: '#5841D8',
+                    backgroundColor: 'rgba(88, 65, 216, 0.1)',
+                    borderWidth: 2,
+                    fill: true,
+                    tension: 0.4,
+                    pointRadius: 0
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                interaction: { intersect: false, mode: 'index' },
+                scales: {
+                    x: {
+                        type: 'time',
+                        time: { unit: 'minute' },
+                        grid: { color: '#2d3748' },
+                        ticks: { color: '#9ca3af' }
+                    },
+                    y: {
+                        grid: { color: '#2d3748' },
+                        ticks: { color: '#9ca3af' }
+                    }
+                },
+                plugins: {
+                    legend: { display: false }
+                }
+            }
+        });
+
+        // Helper to format currency
+        const fmtUSD = (num) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(num);
+
+        async function updateDashboard() {
+            try {
+                // 1. Fetch Status (Positions, Orders, current Equity)
+                const statusRes = await fetch('/api/status');
+                const statusData = await statusRes.json();
+                
+                if (!statusData.meta) return;
+
+                // Update Header/Metrics
+                document.getElementById('last-update-time').innerText = new Date(statusData.meta.last_update * 1000).toLocaleTimeString();
+                document.getElementById('val-equity').innerText = fmtUSD(statusData.meta.equity);
+                document.getElementById('val-balance').innerText = fmtUSD(statusData.meta.balance);
+                
+                // Parse Margin
+                let marginUsed = 0;
+                if(statusData.meta.margin) marginUsed = statusData.meta.margin; // If saved in meta
+                // Fallback calc if needed
+                
+                // Update Positions Table
+                const posBody = document.getElementById('positions-body');
+                const positions = statusData.positions?.openPositions || [];
+                const tickers = statusData.tickers?.tickers || [];
+                
+                document.getElementById('val-pos-count').innerText = positions.length;
+                document.getElementById('positions-empty').classList.toggle('hidden', positions.length > 0);
+                
+                posBody.innerHTML = positions.map(p => {
+                    // Find current price for PnL approx if api doesn't send it
+                    const ticker = tickers.find(t => t.symbol === p.symbol);
+                    const mark = ticker ? ticker.markPrice : p.markPrice || 0;
+                    const pnl = p.pnl || (p.side === 'long' ? (mark - p.price) * p.size : (p.price - mark) * p.size);
+                    const pnlClass = pnl >= 0 ? 'text-green-400' : 'text-red-400';
+                    
+                    return `
+                        <tr>
+                            <td class="table-td font-bold">${p.symbol}</td>
+                            <td class="table-td uppercase ${p.side === 'long' ? 'text-green-500' : 'text-red-500'}">${p.side}</td>
+                            <td class="table-td">${p.size}</td>
+                            <td class="table-td">$${p.price.toFixed(2)}</td>
+                            <td class="table-td">$${mark}</td>
+                            <td class="table-td ${pnlClass}">${pnl ? (pnl > 0 ? '+' : '') + pnl.toFixed(2) : '--'}</td>
+                        </tr>
+                    `;
+                }).join('');
+
+                // Update Orders Table
+                const ordBody = document.getElementById('orders-body');
+                const orders = statusData.orders?.openOrders || [];
+                document.getElementById('orders-empty').classList.toggle('hidden', orders.length > 0);
+
+                ordBody.innerHTML = orders.map(o => `
+                    <tr>
+                        <td class="table-td text-gray-500">${new Date(o.receivedTime).toLocaleTimeString()}</td>
+                        <td class="table-td font-bold">${o.symbol}</td>
+                        <td class="table-td uppercase"><span class="px-2 py-1 rounded bg-gray-700 text-xs">${o.orderType}</span></td>
+                        <td class="table-td ${o.side === 'buy' ? 'text-green-500' : 'text-red-500'}">${o.side.toUpperCase()} ${o.size}</td>
+                        <td class="table-td">$${o.limitPrice || o.stopPrice || 'MKT'}</td>
+                    </tr>
+                `).join('');
+
+                // 2. Fetch History for Chart
+                const histRes = await fetch('/api/history');
+                const histData = await histRes.json();
+                
+                const chartData = histData.map(d => ({ x: d.time * 1000, y: d.equity }));
+                equityChart.data.datasets[0].data = chartData;
+                equityChart.update('none'); // 'none' for performance
+
+            } catch (e) {
+                console.error("Update failed", e);
+            }
+        }
+
+        // Refresh every 2 seconds (UI check)
+        // Note: Backend updates every 10s, but UI can poll faster to catch the update immediately when it happens
+        setInterval(updateDashboard, 2000);
+        updateDashboard();
+    </script>
+</body>
+</html>
+
