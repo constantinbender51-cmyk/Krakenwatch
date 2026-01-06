@@ -4,6 +4,7 @@ Company Primate - Clinical Backend
 ----------------------------------
 Flask + SQLite + Kraken Futures API
 Targeting Flex Margin Equity specifically for balance tracking.
+Restored full UI routing.
 """
 
 import os
@@ -157,6 +158,7 @@ def init_db():
     )''')
     
     c.execute('CREATE INDEX IF NOT EXISTS idx_sym_hist_ts ON symbol_history(timestamp)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_sym_hist_sym ON symbol_history(symbol)')
     conn.commit()
     conn.close()
 
@@ -227,33 +229,27 @@ def fetch_worker():
             tickers = tickers_resp.get('tickers', [])
             positions = positions_resp.get('openPositions', [])
 
-            # Extraction logic for Flex Margin Equity
             total_equity = 0.0
             total_balance = 0.0
             margin = 0.0
             
-            # The API returns results nested under 'accounts'
             res = accounts_resp.get('accounts', {})
             
-            # Specifically check for the 'flex' account key
+            # CRITICAL FIX: Extracting "Flex Margin Equity"
             if 'flex' in res:
                 flex_acc = res['flex']
                 total_equity = float(flex_acc.get('marginEquity', 0))
                 total_balance = float(flex_acc.get('balance', 0))
                 
-                # Try to get utilized margin from auxiliary if not in root
                 aux = flex_acc.get('auxiliary', {})
+                # Some API versions put margin in root, some in auxiliary
                 margin = float(flex_acc.get('marginUsed', aux.get('usedMargin', 0)))
-                
-                logger.info(f"Flex Account Found: Equity=${total_equity}")
+                logger.info(f"Flex Sync: Equity=${total_equity:.2f}")
             else:
-                # Fallback: Iterate through all accounts if 'flex' isn't the key
-                # This handles cases where account keys might be named differently (e.g. fi_xbt_usd)
+                # Fallback iterate
                 for acc_key, acc_val in res.items():
                     if isinstance(acc_val, dict):
-                        # Add up equities from all margin accounts
-                        eq = float(acc_val.get('marginEquity', 0))
-                        total_equity += eq
+                        total_equity += float(acc_val.get('marginEquity', 0))
                         total_balance += float(acc_val.get('balance', 0))
                         margin += float(acc_val.get('marginUsed', acc_val.get('auxiliary', {}).get('usedMargin', 0)))
 
@@ -268,8 +264,6 @@ def fetch_worker():
                 'balance': total_balance,
                 'margin': margin
             })
-
-            logger.info(f"Sync complete. Flex Eq: ${total_equity:.2f}")
 
         except Exception as e:
             logger.error(f"Error in fetch loop: {e}", exc_info=True)
@@ -293,7 +287,12 @@ def close_connection(exception):
 
 @app.route('/')
 def index():
-    return "Clinical Backend Running"
+    # Restore the frontend
+    return render_template('index.html')
+
+@app.route('/api/contact')
+def api_contact():
+    return jsonify({'email': CONTACT_EMAIL})
 
 @app.route('/api/status')
 def api_status():
@@ -302,18 +301,55 @@ def api_status():
         cur = conn.cursor()
         cur.execute("SELECT key, data, updated_at FROM current_state")
         rows = cur.fetchall()
-        data = {row['key']: json.loads(row['data']) for row in rows}
+        data = {}
+        for row in rows:
+            data[row['key']] = json.loads(row['data'])
+            data[row['key']]['_updated'] = row['updated_at']
         return jsonify(data)
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+    except:
+        return jsonify({}), 500
 
 @app.route('/api/balance_history')
 def api_balance_history():
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT timestamp, total_equity FROM account_history ORDER BY timestamp ASC")
+    cur.execute("SELECT timestamp, total_equity FROM account_history ORDER BY id ASC")
     rows = cur.fetchall()
     return jsonify([{'time': r['timestamp'], 'equity': r['total_equity']} for r in rows])
+
+@app.route('/api/symbols_chart')
+def api_symbols_chart():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT timestamp, symbol, value_usd, pnl_usd FROM symbol_history ORDER BY id ASC")
+    rows = cur.fetchall()
+    result = {}
+    for row in rows:
+        sym = row['symbol']
+        if sym not in result:
+            result[sym] = {'invested': [], 'pnl': []}
+        result[sym]['invested'].append({'x': row['timestamp'], 'y': row['value_usd']})
+        result[sym]['pnl'].append({'x': row['timestamp'], 'y': row['pnl_usd']})
+    return jsonify(result)
+
+@app.route('/api/symbol_detail/<symbol>')
+def api_symbol_detail(symbol):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT timestamp, pnl_usd FROM symbol_history WHERE symbol = ? ORDER BY id ASC", (symbol,))
+    pnl_rows = cur.fetchall()
+    
+    cur.execute("SELECT data FROM current_state WHERE key = 'orders'")
+    row = cur.fetchone()
+    orders = []
+    if row:
+        all_orders = json.loads(row['data'])
+        orders = [o for o in all_orders if o.get('symbol') == symbol]
+        
+    return jsonify({
+        'pnl_history': [{'x': r['timestamp'], 'y': r['pnl_usd']} for r in pnl_rows],
+        'orders': orders
+    })
 
 if __name__ == '__main__':
     t = threading.Thread(target=fetch_worker, daemon=True)
