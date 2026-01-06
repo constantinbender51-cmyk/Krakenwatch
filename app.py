@@ -229,6 +229,33 @@ def fetch_worker():
             tickers = tickers_resp.get('tickers', [])
             positions = positions_resp.get('openPositions', [])
 
+            # --- CALCULATE PNL MANUALLY ---
+            # Kraken REST API does not provide 'pnl' in openPositions, so we compute it.
+            # Map symbol -> Mark Price
+            mark_map = {t['symbol']: float(t.get('markPrice', 0)) for t in tickers if 'symbol' in t}
+
+            for p in positions:
+                symbol = p.get('symbol')
+                if not symbol: continue
+                
+                # Extract values
+                try:
+                    entry_price = float(p.get('price', 0))
+                    size = float(p.get('size', 0))
+                    side = p.get('side', 'long')
+                    mark_price = mark_map.get(symbol, entry_price)
+
+                    # Standard Linear PnL Calculation
+                    if side == 'long':
+                        calculated_pnl = (mark_price - entry_price) * size
+                    else:
+                        calculated_pnl = (entry_price - mark_price) * size
+                    
+                    p['pnl'] = calculated_pnl
+                except (ValueError, TypeError):
+                    p['pnl'] = 0.0
+            # -------------------------------
+
             total_equity = 0.0
             total_balance = 0.0
             margin = 0.0
