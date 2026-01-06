@@ -295,6 +295,8 @@
                     invested: investedData.map(pt => ({x: pt.x * 1000, y: pt.y}))
                 };
             });
+            // Sort by value (Descending) so larger areas are drawn first (in the back)
+            // ensuring the white fill works as a proper mask for the background
             symbolsArray.sort((a, b) => b.lastVal - a.lastVal);
 
             const grid = document.getElementById('symbol-links-container');
@@ -316,8 +318,12 @@
                     data: item.invested,
                     borderColor: `rgba(0,0,0, ${0.8 - (idx * 0.15)})`, 
                     borderWidth: 2,
-                    stepped: true
-                    // Multi-line charts usually don't fill to bottom to avoid occlusion
+                    stepped: true,
+                    
+                    // Mask the background image below the line using solid white
+                    // Since we sorted largest to smallest, this stacks correctly
+                    fill: 'start',      
+                    backgroundColor: '#ffffff' 
                 };
             });
 
@@ -347,11 +353,8 @@
                         data: points,
                         borderColor: '#000000',
                         borderWidth: 2,
-                        
-                        // Mask the background image below the line using solid white
                         fill: 'start',      
                         backgroundColor: '#ffffff', 
-                        
                         stepped: true
                     }]
                 },
@@ -432,11 +435,8 @@
                         data: history.map(d => ({ x: d.x * 1000, y: d.y })),
                         borderColor: '#000000',
                         borderWidth: 2,
-                        
-                        // Mask the background image below the line using solid white
                         fill: 'start',
                         backgroundColor: '#ffffff', 
-                        
                         stepped: true
                     }]
                 },
