@@ -10,14 +10,19 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/luxon"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@100;200;300;400;500;600&display=swap" rel="stylesheet">
+    
+    <!-- Fonts: Inter (UI) & JetBrains Mono (Data) -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@100;200;300;400;500;600&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 
     <script>
         tailwind.config = {
             theme: {
                 extend: {
-                    fontFamily: { sans: ['Inter', 'sans-serif'] },
+                    fontFamily: { 
+                        sans: ['Inter', 'sans-serif'],
+                        mono: ['JetBrains Mono', 'monospace'] 
+                    },
                     colors: {
                         medical: {
                             text: '#1a1a1a',
@@ -60,18 +65,19 @@
         }
         .clinical-link:hover { border-bottom-color: #1a1a1a; }
         
-        /* Minimal Table */
+        /* Minimal Table - NOW WITH MONOSPACE DATA */
         .clean-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
         .clean-table th { text-align: left; font-weight: 500; color: #888; padding: 12px 0; border-bottom: 1px solid #e5e5e5; }
-        .clean-table td { padding: 12px 0; border-bottom: 1px solid #f0f0f0; }
+        .clean-table td { padding: 12px 0; border-bottom: 1px solid #f0f0f0; font-family: 'JetBrains Mono', monospace; }
         .clean-table tr:last-child td { border-bottom: none; }
 
-        /* Menu Overlay */
+        /* Menu Overlay - MOVED TO LEFT */
         .menu-overlay {
-            position: fixed; top: 0; right: 0; 
+            position: fixed; top: 0; left: 0; 
             width: 250px; height: 100vh; 
-            background: white; border-left: 1px solid #e5e5e5;
-            transform: translateX(100%); transition: transform 0.3s ease;
+            background: white; border-right: 1px solid #e5e5e5; /* Border on right now */
+            transform: translateX(-100%); /* Start hidden to the left */
+            transition: transform 0.3s ease;
             z-index: 100; padding: 40px;
         }
         .menu-overlay.open { transform: translateX(0); }
@@ -83,8 +89,8 @@
         }
         .menu-backdrop.open { opacity: 1; pointer-events: auto; }
         
-        /* Hidden classes for SPA */
-        .view-section { display: none; opacity: 0; transition: opacity 0.3s; }
+        /* Hidden classes for SPA - FAST FADE */
+        .view-section { display: none; opacity: 0; transition: opacity 0.15s ease-in-out; }
         .view-section.active { display: block; opacity: 1; }
     </style>
 </head>
@@ -95,12 +101,12 @@
         <h1 class="brand-text">Primate</h1>
     </div>
 
-    <!-- Subtle Menu Trigger (Top Right) -->
-    <div class="fixed top-8 right-6 z-50 cursor-pointer p-2 hover:bg-gray-50 rounded-full" onclick="toggleMenu()">
-        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-gray-400 hover:text-black transition"><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle><circle cx="5" cy="12" r="1"></circle></svg>
+    <!-- MOVED TO LEFT: Subtle Menu Trigger -->
+    <div class="fixed top-8 left-6 z-50 cursor-pointer p-2 hover:bg-gray-50 rounded-full" onclick="toggleMenu()">
+        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-gray-400 hover:text-black transition"><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
     </div>
 
-    <!-- Menu Overlay -->
+    <!-- Menu Overlay (Left) -->
     <div class="menu-backdrop" id="menu-backdrop" onclick="toggleMenu()"></div>
     <div class="menu-overlay" id="menu-panel">
         <div class="flex flex-col space-y-6 mt-12">
@@ -125,7 +131,7 @@
             <!-- Symbol Links -->
             <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-6" id="symbol-links-container">
                 <!-- Injected Links -->
-                <div class="text-center text-gray-300 text-sm col-span-full">Loading assets...</div>
+                <div class="text-center text-gray-300 text-sm col-span-full font-mono">Loading assets...</div>
             </div>
         </div>
 
@@ -137,7 +143,8 @@
             
             <div class="flex justify-between items-baseline mb-12">
                 <h1 class="text-4xl font-light text-black" id="detail-title">--</h1>
-                <div class="text-xl font-light" id="detail-pnl">--</div>
+                <!-- MONOSPACE PNL -->
+                <div class="text-xl font-light font-mono" id="detail-pnl">--</div>
             </div>
 
             <div class="mb-12">
@@ -160,7 +167,7 @@
                     </thead>
                     <tbody id="detail-orders-body"></tbody>
                 </table>
-                <div id="detail-orders-empty" class="py-4 text-gray-400 text-sm hidden">No active orders.</div>
+                <div id="detail-orders-empty" class="py-4 text-gray-400 text-sm font-mono hidden">No active orders.</div>
             </div>
         </div>
 
@@ -187,14 +194,14 @@
                 </thead>
                 <tbody id="log-table-body"></tbody>
             </table>
-            <div id="log-empty" class="py-12 text-center text-gray-400 hidden">No events found.</div>
+            <div id="log-empty" class="py-12 text-center text-gray-400 font-mono hidden">No events found.</div>
         </div>
 
         <!-- VIEW: CONTACT -->
         <div id="view-contact" class="view-section">
             <div class="flex flex-col items-center justify-center h-[60vh]">
                 <div class="text-sm text-gray-400 mb-2">Contact</div>
-                <div class="text-xl font-light border-b border-gray-200 pb-1" id="contact-email">
+                <div class="text-xl font-light font-mono border-b border-gray-200 pb-1" id="contact-email">
                     Loading...
                 </div>
             </div>
@@ -207,8 +214,8 @@
         // --- Setup ---
         const fmtUSD = (num) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(num);
 
-        // Clinical Chart Defaults
-        Chart.defaults.font.family = "'Inter', sans-serif";
+        // Clinical Chart Defaults - UPDATED FONT to JetBrains Mono
+        Chart.defaults.font.family = "'JetBrains Mono', monospace";
         Chart.defaults.font.size = 11;
         Chart.defaults.color = '#888';
         Chart.defaults.scale.grid.color = '#f5f5f5';
@@ -255,12 +262,12 @@
             navigate: (page, param = null) => {
                 document.querySelectorAll('.view-section').forEach(el => {
                     el.classList.remove('active');
-                    setTimeout(() => { if(!el.classList.contains('active')) el.style.display = 'none'; }, 300);
+                    // FAST FADE: Reduced to 150ms
+                    setTimeout(() => { if(!el.classList.contains('active')) el.style.display = 'none'; }, 150);
                 });
 
                 const target = document.getElementById(page === 'symbol' ? 'view-symbol' : `view-${page}`);
                 target.style.display = 'block';
-                // Small delay to allow display block to apply before opacity transition
                 setTimeout(() => target.classList.add('active'), 10);
 
                 if (page === 'home') loadHomeData();
@@ -277,7 +284,6 @@
             const chartRes = await fetch('/api/symbols_chart');
             const chartData = await chartRes.json();
             
-            // Convert to array and sort by latest invested value
             const symbolsArray = Object.keys(chartData).map(sym => {
                 const investedData = chartData[sym].invested || [];
                 const lastVal = investedData.length > 0 ? investedData[investedData.length - 1].y : 0;
@@ -288,24 +294,22 @@
                 };
             });
 
-            // SORT: Highest position size first
             symbolsArray.sort((a, b) => b.lastVal - a.lastVal);
 
-            // Render Links (Clean Grid)
+            // Render Links - KEEPING ORIGINAL GRID, just adding font-mono to price
             const grid = document.getElementById('symbol-links-container');
             if (symbolsArray.length === 0) {
-                grid.innerHTML = '<div class="col-span-full text-center text-gray-300 text-sm">No data available</div>';
+                grid.innerHTML = '<div class="col-span-full text-center text-gray-300 text-sm font-mono">No data available</div>';
             } else {
                 grid.innerHTML = symbolsArray.map(item => `
                     <div onclick="router.navigate('symbol', '${item.sym}')" 
                          class="text-center py-4 border border-transparent hover:border-gray-100 rounded cursor-pointer transition text-sm text-gray-600 hover:text-black">
                         <div class="font-medium">${item.sym}</div>
-                        <div class="text-xs text-gray-400 mt-1">${fmtUSD(item.lastVal)}</div>
+                        <div class="text-xs text-gray-400 mt-1 font-mono">${fmtUSD(item.lastVal)}</div>
                     </div>
                 `).join('');
             }
 
-            // Render Chart (Position Size USD)
             const datasets = symbolsArray.map((item, idx) => {
                 return {
                     label: item.sym,
@@ -349,9 +353,7 @@
             const res = await fetch('/api/status');
             const data = await res.json();
             
-            // Prefer history events if available, otherwise fall back to empty
             const history = data.history || [];
-            
             const tbody = document.getElementById('log-table-body');
             
             if (history.length > 0) {
@@ -370,13 +372,13 @@
                     
                     return `
                     <tr>
-                        <td class="text-gray-500 text-xs">${new Date(time).toLocaleString()}</td>
+                        <td class="text-gray-500 text-xs font-mono">${new Date(time).toLocaleString()}</td>
                         <td>
                             <b>${symbol}</b>
                             <span class="text-xs text-gray-400 ml-1 uppercase border border-gray-100 px-1 rounded">${type}</span>
                         </td>
                         <td class="${sideClass} uppercase font-medium text-xs">${side}</td>
-                        <td class="text-gray-700">${size}</td>
+                        <td class="text-gray-700 font-mono">${size}</td>
                         <td class="text-gray-700 font-mono text-xs">${price !== 'MKT' ? '$' + price : price}</td>
                     </tr>
                 `;
@@ -392,7 +394,6 @@
         async function loadSymbolData(symbol) {
             document.getElementById('detail-title').innerText = symbol;
             
-            // Get Current PnL
             const statusRes = await fetch('/api/status');
             const status = await statusRes.json();
             const pos = (status.positions || []).find(p => p.symbol === symbol);
@@ -430,8 +431,8 @@
                 <tr>
                     <td class="uppercase text-xs tracking-wider">${o.orderType}</td>
                     <td class="${o.side === 'buy' ? 'text-green-700' : 'text-red-700'}">${o.side}</td>
-                    <td>${o.size}</td>
-                    <td>$${o.limitPrice || o.stopPrice || 'MKT'}</td>
+                    <td class="font-mono">${o.size}</td>
+                    <td class="font-mono">$${o.limitPrice || o.stopPrice || 'MKT'}</td>
                 </tr>
             `).join('');
             document.getElementById('detail-orders-empty').classList.toggle('hidden', detail.orders.length > 0);
@@ -449,4 +450,5 @@
     </script>
 </body>
 </html>
+
 
