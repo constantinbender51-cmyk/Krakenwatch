@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Kraken Account Observatory
---------------------------
-Railway Ready Version
+Company Primate - Professional Web Presence
+-------------------------------------------
+Backend: Flask + SQLite + Kraken Futures API
 """
 
 import os
@@ -20,26 +20,23 @@ from datetime import datetime
 from typing import Dict, Any, Optional
 
 import requests
-from flask import Flask, render_template, jsonify, g
+from flask import Flask, render_template, jsonify, g, request
 
 # Configure Logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-logger = logging.getLogger("Observatory")
+logger = logging.getLogger("Primate")
 
 # ------------------------------------------------------------------
 # CONFIGURATION
 # ------------------------------------------------------------------
-# Railway Configuration:
-# 1. Mount your volume to a path (e.g., /data)
-# 2. Set Env Var DB_FILE_PATH to /data/observatory.db
-DB_FILE = os.getenv('DB_FILE_PATH', 'observatory.db')
-
+DB_FILE = os.getenv('DB_FILE_PATH', 'primate.db')
 FETCH_INTERVAL = 10  # seconds
 API_KEY = os.getenv("KRAKEN_KEY", "")
 API_SECRET = os.getenv("KRAKEN_SECRET", "")
+CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "contact@companyprimate.com")
 
 if not API_KEY or not API_SECRET:
     logger.warning("WARNING: KRAKEN_KEY or KRAKEN_SECRET env vars are missing.")
@@ -77,7 +74,7 @@ class KrakenFuturesApi:
         headers = {
             "APIKey": self.api_key,
             "Nonce": nonce,
-            "User-Agent": "Kraken-Observatory/1.0",
+            "User-Agent": "Primate-Observatory/2.0",
         }
 
         if method.upper() == "POST":
@@ -116,7 +113,6 @@ class KrakenFuturesApi:
 def get_db():
     db = getattr(g, '_database', None)
     if db is None:
-        # Ensure directory exists if path is nested
         db_dir = os.path.dirname(DB_FILE)
         if db_dir and not os.path.exists(db_dir):
             try:
@@ -130,7 +126,6 @@ def get_db():
 
 def init_db():
     """Initialize database tables if they don't exist."""
-    # Ensure directory exists
     db_dir = os.path.dirname(DB_FILE)
     if db_dir and not os.path.exists(db_dir):
         os.makedirs(db_dir)
@@ -138,6 +133,7 @@ def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     
+    # 1. Account History (Global Equity)
     c.execute('''CREATE TABLE IF NOT EXISTS account_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         timestamp REAL,
@@ -146,24 +142,78 @@ def init_db():
         margin_utilized REAL
     )''')
 
+    # 2. Symbol History (Per-symbol tracking)
+    # Value = size * price, PnL = current PnL
+    c.execute('''CREATE TABLE IF NOT EXISTS symbol_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp REAL,
+        symbol TEXT,
+        side TEXT,
+        size REAL,
+        price REAL,
+        mark_price REAL,
+        value_usd REAL,
+        pnl_usd REAL
+    )''')
+
+    # 3. Current State (Latest API Dump)
     c.execute('''CREATE TABLE IF NOT EXISTS current_state (
         key TEXT PRIMARY KEY,
         data TEXT,
         updated_at REAL
     )''')
     
+    # Indexes for speed
+    c.execute('CREATE INDEX IF NOT EXISTS idx_sym_hist_ts ON symbol_history(timestamp)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_sym_hist_sym ON symbol_history(symbol)')
+
     conn.commit()
     conn.close()
     logger.info(f"Database initialized at {DB_FILE}")
 
-def save_snapshot(equity, balance, margin):
+def save_snapshot(equity, balance, margin, positions_list, tickers_list):
+    """Save global and per-symbol snapshots"""
     try:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
+        now = time.time()
+
+        # 1. Global
         c.execute(
             "INSERT INTO account_history (timestamp, total_equity, total_balance, margin_utilized) VALUES (?, ?, ?, ?)",
-            (time.time(), equity, balance, margin)
+            (now, equity, balance, margin)
         )
+
+        # 2. Per Symbol
+        # Create a map of tickers for fast price lookup
+        ticker_map = {t['symbol']: t.get('markPrice', 0) for t in tickers_list}
+
+        for p in positions_list:
+            symbol = p.get('symbol')
+            if not symbol: continue
+
+            side = p.get('side', 'long')
+            size = float(p.get('size', 0))
+            entry_price = float(p.get('price', 0))
+            mark_price = float(ticker_map.get(symbol, entry_price)) # Fallback to entry if no ticker
+            
+            # Calculate Value in USD (Size * Mark Price)
+            value_usd = size * mark_price
+            
+            # PnL (API usually provides it, but we can calc approx if missing)
+            pnl = float(p.get('pnl', 0))
+            if pnl == 0 and size > 0:
+                if side == 'long':
+                    pnl = (mark_price - entry_price) * size
+                else:
+                    pnl = (entry_price - mark_price) * size
+
+            c.execute('''INSERT INTO symbol_history 
+                (timestamp, symbol, side, size, price, mark_price, value_usd, pnl_usd) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+                (now, symbol, side, size, entry_price, mark_price, value_usd, pnl)
+            )
+
         conn.commit()
         conn.close()
     except Exception as e:
@@ -194,78 +244,60 @@ def fetch_worker():
             start_time = time.time()
             
             accounts = api.get_accounts()
-            positions = api.get_open_positions()
-            orders = api.get_open_orders()
-            tickers = api.get_tickers()
+            positions_resp = api.get_open_positions()
+            orders_resp = api.get_open_orders()
+            tickers_resp = api.get_tickers()
 
+            # Parse Tickers
+            tickers = []
+            if isinstance(tickers_resp, dict) and 'tickers' in tickers_resp:
+                tickers = tickers_resp['tickers']
+
+            # Parse Positions
+            positions = []
+            if isinstance(positions_resp, dict) and 'openPositions' in positions_resp:
+                positions = positions_resp['openPositions']
+
+            # Calculate Global Metrics
             total_equity = 0.0
             total_balance = 0.0
             margin = 0.0
             
-            # Robust account parsing
-            # Attempt to locate the account data structure
-            payload = accounts
-            if isinstance(accounts.get('result'), dict):
-                payload = accounts['result']
-            
-            acc_data = None
-            if 'accounts' in payload:
-                acc_data = payload['accounts']
-            elif 'flex' in payload:
-                # Fallback based on user hint: 'flex' might be at the root/result level
-                acc_data = payload
-            
-            if acc_data:
-                # Determine if it's a list or dict and get an iterator of OBJECTS
-                if isinstance(acc_data, dict):
-                    acc_iterator = acc_data.values()
-                elif isinstance(acc_data, list):
-                    acc_iterator = acc_data
-                else:
-                    logger.warning(f"Unknown accounts structure type: {type(acc_data)}")
-                    acc_iterator = []
+            # Account parsing logic
+            payload = accounts.get('result', accounts) if isinstance(accounts, dict) else accounts
+            acc_data = payload.get('accounts', payload) if isinstance(payload, dict) else payload
 
-                for acc in acc_iterator:
-                    if not isinstance(acc, dict):
-                        # Skip if the item itself is a string/other
-                        continue
+            # Normalize acc_data to list
+            acc_list = []
+            if isinstance(acc_data, dict):
+                acc_list = acc_data.values()
+            elif isinstance(acc_data, list):
+                acc_list = acc_data
 
-                    # Safe parsing for balances
-                    balances = acc.get('balances', {})
-                    if isinstance(balances, dict):
-                        if 'usd' in balances:
-                            total_balance += float(balances.get('usd', 0))
-                        elif 'usdt' in balances:
-                            total_balance += float(balances.get('usdt', 0))
-                    
-                    # Safe parsing for equity
-                    # Check for 'marginEquity' (Futures), 'pv', or 'equity'
-                    val = 0.0
-                    aux = acc.get('auxiliary', {})
-                    if not isinstance(aux, dict):
-                        aux = {}
-
-                    if 'marginEquity' in acc:
-                        val = float(acc['marginEquity'])
-                    elif 'marginEquity' in aux:
-                        val = float(aux['marginEquity'])
-                    elif 'pv' in aux:
-                        val = float(aux.get('pv', 0))
-                    elif 'equity' in aux:
-                        val = float(aux.get('equity', 0))
-                    
-                    total_equity += val
-                        
-                    if 'usedMargin' in aux:
-                        margin += float(aux.get('usedMargin', 0))
+            for acc in acc_list:
+                if not isinstance(acc, dict): continue
+                
+                # Balance
+                bals = acc.get('balances', {})
+                if 'usd' in bals: total_balance += float(bals['usd'])
+                elif 'usdt' in bals: total_balance += float(bals['usdt'])
+                
+                # Equity
+                aux = acc.get('auxiliary', {})
+                val = float(acc.get('marginEquity', aux.get('marginEquity', aux.get('pv', aux.get('equity', 0)))))
+                total_equity += val
+                
+                # Margin
+                margin += float(aux.get('usedMargin', 0))
 
             if total_equity == 0 and total_balance > 0:
                 total_equity = total_balance
 
-            save_snapshot(total_equity, total_balance, margin)
+            # Save Data
+            save_snapshot(total_equity, total_balance, margin, positions, tickers)
             
             update_current_state('positions', positions)
-            update_current_state('orders', orders)
+            update_current_state('orders', orders_resp.get('openOrders', []))
             update_current_state('tickers', tickers)
             update_current_state('meta', {
                 'last_update': time.time(),
@@ -273,15 +305,8 @@ def fetch_worker():
                 'balance': total_balance,
                 'margin': margin
             })
-            
-            # Count positions safely
-            pos_count = 0
-            if isinstance(positions, dict):
-                p_list = positions.get('openPositions', [])
-                if isinstance(p_list, list):
-                    pos_count = len(p_list)
 
-            logger.info(f"Updated. Eq: ${total_equity:.2f} | Pos: {pos_count}")
+            logger.info(f"Updated. Eq: ${total_equity:.2f} | Pos: {len(positions)}")
 
         except Exception as e:
             logger.error(f"Error in fetch loop: {e}", exc_info=True)
@@ -290,22 +315,13 @@ def fetch_worker():
         sleep_time = max(0, FETCH_INTERVAL - elapsed)
         time.sleep(sleep_time)
 
-#  ------------------------------------------------------------------
+# ------------------------------------------------------------------
 # FLASK WEB APP
 # ------------------------------------------------------------------
 app = Flask(__name__)
 
-# --- ADD THIS BLOCK HERE ---
-# Initialize DB immediately on import so Gunicorn runs it
 with app.app_context():
-    if not os.path.exists(DB_FILE):
-        logger.info("Database file not found. Initializing...")
-        init_db()
-    else:
-        # Run init_db anyway to ensure tables exist (idempotent)
-        init_db()
-# ---------------------------
-
+    init_db()
 
 @app.teardown_appcontext
 def close_connection(exception):
@@ -317,66 +333,98 @@ def close_connection(exception):
 def index():
     return render_template('index.html')
 
+# --- APIs ---
+
+@app.route('/api/contact')
+def api_contact():
+    return jsonify({'email': CONTACT_EMAIL})
+
 @app.route('/api/status')
 def api_status():
+    """Get current snapshot of everything"""
     try:
         conn = get_db()
         cur = conn.cursor()
         cur.execute("SELECT key, data, updated_at FROM current_state")
         rows = cur.fetchall()
-        
         data = {}
         for row in rows:
-            try:
-                data[row['key']] = json.loads(row['data'])
-                data[row['key']]['_updated'] = row['updated_at']
-            except:
-                data[row['key']] = None
+            data[row['key']] = json.loads(row['data'])
+            data[row['key']]['_updated'] = row['updated_at']
         return jsonify(data)
-    except Exception as e:
-        logger.error(f"API Status Error: {e}")
+    except:
         return jsonify({}), 500
 
-@app.route('/api/history')
-def api_history():
-    try:
-        conn = get_db()
-        cur = conn.cursor()
-        # Limit to last 2880 points (approx 8 hours at 10s intervals) to keep payload light
-        cur.execute("SELECT timestamp, total_equity, total_balance, margin_utilized FROM account_history ORDER BY id DESC LIMIT 2880")
-        rows = cur.fetchall()
+@app.route('/api/balance_history')
+def api_balance_history():
+    """Get global equity history for the Balance tab"""
+    conn = get_db()
+    cur = conn.cursor()
+    # Limit to ~24h (8640 points at 10s is too much, let's limit to 2000)
+    cur.execute("SELECT timestamp, total_equity FROM account_history ORDER BY id DESC LIMIT 2000")
+    rows = cur.fetchall()
+    return jsonify([{'time': r['timestamp'], 'equity': r['total_equity']} for r in reversed(rows)])
+
+@app.route('/api/symbols_chart')
+def api_symbols_chart():
+    """
+    Get aggregated history for the Main Page Chart.
+    Returns: { 'symbol_A': [{time, value_usd}, ...], 'symbol_B': ... }
+    """
+    conn = get_db()
+    cur = conn.cursor()
+    # Get last 2000 entries of symbol history
+    # Note: simple query, client side will handle the multi-line logic
+    cur.execute("SELECT timestamp, symbol, value_usd FROM symbol_history ORDER BY id DESC LIMIT 5000")
+    rows = cur.fetchall()
+    
+    result = {}
+    # Organize by symbol
+    for row in reversed(rows):
+        sym = row['symbol']
+        if sym not in result:
+            result[sym] = []
+        result[sym].append({'x': row['timestamp'], 'y': row['value_usd']})
+    
+    return jsonify(result)
+
+@app.route('/api/symbol_detail/<symbol>')
+def api_symbol_detail(symbol):
+    """Get PnL history and orders for a specific symbol"""
+    conn = get_db()
+    cur = conn.cursor()
+    
+    # 1. PnL History
+    cur.execute(
+        "SELECT timestamp, pnl_usd FROM symbol_history WHERE symbol = ? ORDER BY id DESC LIMIT 1000", 
+        (symbol,)
+    )
+    pnl_rows = cur.fetchall()
+    pnl_history = [{'x': r['timestamp'], 'y': r['pnl_usd']} for r in reversed(pnl_rows)]
+    
+    # 2. Orders (Filter from current open orders)
+    # Note: We only have *open* orders in current_state. 
+    # If we wanted historical orders, we'd need to fetch fill history from API, 
+    # but for now we filter the cached open orders.
+    cur.execute("SELECT data FROM current_state WHERE key = 'orders'")
+    row = cur.fetchone()
+    orders = []
+    if row:
+        all_orders = json.loads(row['data'])
+        orders = [o for o in all_orders if o.get('symbol') == symbol]
         
-        history = []
-        for row in reversed(rows):
-            history.append({
-                'time': row['timestamp'],
-                'equity': row['total_equity'],
-                'balance': row['total_balance'],
-                'margin': row['margin_utilized']
-            })
-            
-        return jsonify(history)
-    except Exception as e:
-        logger.error(f"API History Error: {e}")
-        return jsonify([]), 500
+    return jsonify({
+        'pnl_history': pnl_history,
+        'orders': orders
+    })
 
 # ------------------------------------------------------------------
 # MAIN ENTRY
 # ------------------------------------------------------------------
 if __name__ == '__main__':
-    # Initialize DB
-    if not os.path.exists(DB_FILE):
-        init_db()
-    else:
-        init_db() # Ensure schema
-
-    # Start Background Thread
     t = threading.Thread(target=fetch_worker, daemon=True)
     t.start()
-
-    # Get PORT from environment (Railway standard)
-    port = int(os.environ.get("PORT", 5000))
     
-    # Host must be 0.0.0.0
-    print(f"Starting Kraken Observatory on port {port} using DB: {DB_FILE}")
+    port = int(os.environ.get("PORT", 5000))
+    print(f"Company Primate Online on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
