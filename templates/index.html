@@ -71,7 +71,7 @@
         .clean-table td { padding: 12px 0; border-bottom: 1px solid #f0f0f0; font-family: 'JetBrains Mono', monospace; }
         .clean-table tr:last-child td { border-bottom: none; }
 
-        /* Menu Overlay - BACK TO RIGHT */
+        /* Menu Overlay - RIGHT SIDE */
         .menu-overlay {
             position: fixed; top: 0; right: 0; 
             width: 250px; height: 100vh; 
@@ -101,7 +101,7 @@
         <h1 class="brand-text">Primate</h1>
     </div>
 
-    <!-- MOVED BACK TO RIGHT: Subtle Menu Trigger -->
+    <!-- Menu Trigger (Right Side - Dots) -->
     <div class="fixed top-8 right-6 z-50 cursor-pointer p-2 hover:bg-gray-50 rounded-full" onclick="toggleMenu()">
         <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-gray-400 hover:text-black transition"><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle><circle cx="5" cy="12" r="1"></circle></svg>
     </div>
@@ -143,7 +143,7 @@
             
             <div class="flex justify-between items-baseline mb-12">
                 <h1 class="text-4xl font-light text-black" id="detail-title">--</h1>
-                <!-- MONOSPACE PNL -->
+                <!-- MONOSPACE PNL - Now shows Value instead of 'Closed' -->
                 <div class="text-xl font-light font-mono" id="detail-pnl">--</div>
             </div>
 
@@ -393,30 +393,29 @@
 
         async function loadSymbolData(symbol) {
             document.getElementById('detail-title').innerText = symbol;
-            
-            const statusRes = await fetch('/api/status');
-            const status = await statusRes.json();
-            const pos = (status.positions || []).find(p => p.symbol === symbol);
-            
-            const pnlEl = document.getElementById('detail-pnl');
-            if (pos) {
-                let pnl = pos.pnl || 0;
-                pnlEl.innerText = (pnl >= 0 ? '+' : '') + fmtUSD(pnl);
-                pnlEl.style.color = pnl >= 0 ? '#1a1a1a' : '#ef4444';
-            } else {
-                pnlEl.innerText = 'Closed';
-                pnlEl.style.color = '#888';
-            }
 
+            // FETCH DATA FIRST to resolve the "Closed" vs Chart mismatch
             const detailRes = await fetch(`/api/symbol_detail/${symbol}`);
             const detail = await detailRes.json();
+            
+            // Get PnL History from detail (The chart data)
+            const history = detail.pnl_history || [];
+            // Use the last value of the chart as the display value, so they match
+            const lastPnlValue = history.length > 0 ? history[history.length - 1].y : 0;
+            
+            const pnlEl = document.getElementById('detail-pnl');
+            
+            // Set Text
+            pnlEl.innerText = (lastPnlValue >= 0 ? '+' : '') + fmtUSD(lastPnlValue);
+            pnlEl.style.color = lastPnlValue >= 0 ? '#1a1a1a' : '#ef4444';
 
+            // Chart
             if (chartInstances.detail) chartInstances.detail.destroy();
             chartInstances.detail = new Chart(document.getElementById('detailChart'), {
                 type: 'line',
                 data: {
                     datasets: [{
-                        data: detail.pnl_history.map(d => ({ x: d.x * 1000, y: d.y })),
+                        data: history.map(d => ({ x: d.x * 1000, y: d.y })),
                         borderColor: '#1a1a1a',
                         borderWidth: 1.5,
                         fill: false,
@@ -426,6 +425,7 @@
                 options: minimalChartOptions
             });
 
+            // Orders
             const ordBody = document.getElementById('detail-orders-body');
             ordBody.innerHTML = detail.orders.map(o => `
                 <tr>
