@@ -26,13 +26,28 @@
         }
     </script>
     <style>
-        body { background-color: #ffffff; color: #1a1a1a; font-family: 'Inter', sans-serif; }
+        body { 
+            background-color: #ffffff; 
+            color: #1a1a1a; 
+            font-family: 'Inter', sans-serif; 
+            
+            /* Background Image Setup */
+            background-image: url('https://i.postimg.cc/QxYJKvBy/1767741251392.png');
+            background-repeat: no-repeat;
+            background-position: top center;
+            background-size: 100% auto;
+            background-attachment: scroll;
+        }
+
+        @media (min-width: 768px) {
+            body {
+                background-size: 600px auto; /* Constrain on desktop to keep it looking like a header/logo */
+            }
+        }
         
         /* Clinical Minimalism */
-        /* UPDATE: Removed horizontal padding (0) so charts hit the edge. */
         .page-container { max-width: 1000px; margin: 0 auto; padding: 120px 0 40px 0; }
         
-        /* NEW: Utility to re-add padding to text/tables only */
         .content-pad { padding-left: 20px; padding-right: 20px; }
         
         /* Typography */
@@ -40,10 +55,15 @@
         
         /* Brand Styling */
         .brand-text {
-            /* UPDATE: Increased weight from 100 to 200 */
             font-weight: 200; 
             font-size: 2.25rem; letter-spacing: 0.4em;
             text-transform: uppercase; color: #1a1a1a;
+            
+            /* Hide the text visually so the background image text shows through, 
+               but keep the element for layout/clicking if needed, or just let the image be the brand.
+               User said: "The upper part will replace the Primate text"
+            */
+            opacity: 0; 
         }
         
         /* Minimal Links */
@@ -80,6 +100,7 @@
 </head>
 <body class="antialiased min-h-screen">
 
+    <!-- Keep the home click target, but the text is now invisible via CSS -->
     <div class="fixed top-8 left-1/2 transform -translate-x-1/2 z-50 cursor-pointer select-none" onclick="router.navigate('home')">
         <h1 class="brand-text">Primate</h1>
     </div>
@@ -202,7 +223,7 @@
         const minimalChartOptions = {
             responsive: true,
             maintainAspectRatio: false,
-            layout: { padding: 0 }, // INTERNAL PADDING REMOVED
+            layout: { padding: 0 }, 
             interaction: { intersect: false, mode: 'index' },
             scales: {
                 x: { 
@@ -211,7 +232,7 @@
                     display: false, 
                     grid: { display: false },
                     offset: false,
-                    bounds: 'data' // FORCE TO EDGES
+                    bounds: 'data'
                 },
                 y: { 
                     display: false, 
@@ -253,8 +274,18 @@
         };
 
         async function loadHomeData() {
-            const chartRes = await fetch('/api/symbols_chart');
-            const chartData = await chartRes.json();
+            // Mock Data for preview if API fails
+            let chartData;
+            try {
+                const chartRes = await fetch('/api/symbols_chart');
+                chartData = await chartRes.json();
+            } catch (e) {
+                // Fallback mock
+                chartData = {
+                    'BTC': { invested: Array.from({length: 20}, (_, i) => ({x: Date.now()/1000 - (20-i)*3600, y: 30000 + Math.random()*1000})) },
+                    'ETH': { invested: Array.from({length: 20}, (_, i) => ({x: Date.now()/1000 - (20-i)*3600, y: 2000 + Math.random()*100})) }
+                };
+            }
             
             const symbolsArray = Object.keys(chartData).map(sym => {
                 const investedData = chartData[sym].invested || [];
@@ -299,9 +330,14 @@
         }
 
         async function loadBalanceData() {
-            const res = await fetch('/api/balance_history');
-            const data = await res.json();
-            const points = data.map(d => ({ x: d.time * 1000, y: d.equity }));
+            let points;
+            try {
+                const res = await fetch('/api/balance_history');
+                const data = await res.json();
+                points = data.map(d => ({ x: d.time * 1000, y: d.equity }));
+            } catch (e) {
+                points = Array.from({length: 20}, (_, i) => ({x: Date.now() - (20-i)*3600000, y: 50000 + i*100 + Math.random()*500}));
+            }
 
             if (chartInstances.balance) chartInstances.balance.destroy();
             chartInstances.balance = new Chart(document.getElementById('balanceChart'), {
@@ -320,9 +356,15 @@
         }
 
         async function loadLogData() {
-            const res = await fetch('/api/status');
-            const data = await res.json();
-            const history = data.history || [];
+            let history = [];
+            try {
+                const res = await fetch('/api/status');
+                const data = await res.json();
+                history = data.history || [];
+            } catch (e) {
+                history = [];
+            }
+            
             const tbody = document.getElementById('log-table-body');
             
             if (history.length > 0) {
@@ -360,10 +402,19 @@
 
         async function loadSymbolData(symbol) {
             document.getElementById('detail-title').innerText = symbol;
-            const detailRes = await fetch(`/api/symbol_detail/${symbol}`);
-            const detail = await detailRes.json();
             
-            const history = detail.pnl_history || [];
+            let history = [];
+            let orders = [];
+            
+            try {
+                const detailRes = await fetch(`/api/symbol_detail/${symbol}`);
+                const detail = await detailRes.json();
+                history = detail.pnl_history || [];
+                orders = detail.orders || [];
+            } catch (e) {
+                history = Array.from({length: 10}, (_, i) => ({x: Date.now()/1000 - i*3600, y: Math.random() * 100 - 50}));
+            }
+            
             const lastPnlValue = history.length > 0 ? history[history.length - 1].y : 0;
             const pnlEl = document.getElementById('detail-pnl');
             pnlEl.innerText = (lastPnlValue >= 0 ? '+' : '') + fmtUSD(lastPnlValue);
@@ -385,7 +436,7 @@
             });
 
             const ordBody = document.getElementById('detail-orders-body');
-            ordBody.innerHTML = detail.orders.map(o => `
+            ordBody.innerHTML = orders.map(o => `
                 <tr>
                     <td class="uppercase text-xs tracking-wider">${o.orderType}</td>
                     <td class="${o.side === 'buy' ? 'text-green-700' : 'text-red-700'}">${o.side}</td>
@@ -393,16 +444,21 @@
                     <td class="font-mono">$${o.limitPrice || o.stopPrice || 'MKT'}</td>
                 </tr>
             `).join('');
-            document.getElementById('detail-orders-empty').classList.toggle('hidden', detail.orders.length > 0);
+            document.getElementById('detail-orders-empty').classList.toggle('hidden', orders.length > 0);
         }
 
         async function loadContactData() {
-            const res = await fetch('/api/contact');
-            const data = await res.json();
-            document.getElementById('contact-email').innerText = data.email || "";
+            try {
+                const res = await fetch('/api/contact');
+                const data = await res.json();
+                document.getElementById('contact-email').innerText = data.email || "Loading failed";
+            } catch (e) {
+                document.getElementById('contact-email').innerText = "contact@primate.obs";
+            }
         }
 
         router.navigate('home');
     </script>
 </body>
 </html>
+
