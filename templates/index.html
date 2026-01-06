@@ -10,7 +10,7 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/luxon"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@100;200;300;400;500;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 
     <script>
@@ -34,10 +34,19 @@
         body { background-color: #ffffff; color: #1a1a1a; font-family: 'Inter', sans-serif; }
         
         /* Clinical Minimalism */
-        .page-container { max-width: 1000px; margin: 0 auto; padding: 80px 20px 40px 20px; }
+        .page-container { max-width: 1000px; margin: 0 auto; padding: 120px 20px 40px 20px; }
         
         /* Typography */
-        h1, h2, h3 { font-weight: 500; letter-spacing: -0.02em; }
+        h1, h2, h3 { font-weight: 400; letter-spacing: -0.02em; }
+        
+        /* Brand Styling */
+        .brand-text {
+            font-weight: 100;
+            font-size: 2.25rem;
+            letter-spacing: 0.4em;
+            text-transform: uppercase;
+            color: #1a1a1a;
+        }
         
         /* Minimal Links */
         .clinical-link { 
@@ -82,12 +91,12 @@
 <body class="antialiased min-h-screen">
 
     <!-- Brand Header (Fixed Top Center) -->
-    <div class="fixed top-6 left-1/2 transform -translate-x-1/2 z-50 cursor-pointer select-none" onclick="router.navigate('home')">
-        <span class="font-semibold text-lg tracking-tight text-medical-text">Primate</span>
+    <div class="fixed top-8 left-1/2 transform -translate-x-1/2 z-50 cursor-pointer select-none" onclick="router.navigate('home')">
+        <h1 class="brand-text">Primate</h1>
     </div>
 
     <!-- Subtle Menu Trigger (Top Right) -->
-    <div class="fixed top-6 right-6 z-50 cursor-pointer p-2 hover:bg-gray-50 rounded-full" onclick="toggleMenu()">
+    <div class="fixed top-8 right-6 z-50 cursor-pointer p-2 hover:bg-gray-50 rounded-full" onclick="toggleMenu()">
         <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-gray-400 hover:text-black transition"><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle><circle cx="5" cy="12" r="1"></circle></svg>
     </div>
 
@@ -301,8 +310,6 @@
                 return {
                     label: item.sym,
                     data: item.invested,
-                    borderColor: '#1a1a1a', 
-                    // Keep existing color logic as requested
                     borderColor: `hsl(0, 0%, ${Math.max(0, idx * 10)}%)`, 
                     borderWidth: 1.5,
                     tension: 0
@@ -368,7 +375,7 @@
             if (pos) {
                 let pnl = pos.pnl || 0;
                 pnlEl.innerText = (pnl >= 0 ? '+' : '') + fmtUSD(pnl);
-                pnlEl.style.color = pnl >= 0 ? '#1a1a1a' : '#ef4444'; // Black for gain, Red for loss (clinical standard)
+                pnlEl.style.color = pnl >= 0 ? '#1a1a1a' : '#ef4444';
             } else {
                 pnlEl.innerText = 'Closed';
                 pnlEl.style.color = '#888';
@@ -416,5 +423,4 @@
     </script>
 </body>
 </html>
-
 
