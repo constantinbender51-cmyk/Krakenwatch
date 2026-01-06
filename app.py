@@ -23,11 +23,11 @@ from typing import Dict, Any, Optional
 from flask import Flask, render_template, jsonify, g
 
 # --- IMPORT EXTERNAL LIBRARY ---
-# Assumes the file provided is named 'kraken_futures_api.py'
+# Assumes the file provided is named 'kraken_futures.py'
 try:
-    from kraken_futures_api import KrakenFuturesApi
+    from kraken_futures import KrakenFuturesApi
 except ImportError:
-    print("CRITICAL: 'kraken_futures_api.py' not found in directory.")
+    print("CRITICAL: 'kraken_futures.py' not found in directory.")
     sys.exit(1)
 
 # Configure Logging
