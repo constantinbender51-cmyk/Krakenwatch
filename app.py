@@ -203,9 +203,19 @@ def fetch_worker():
             margin = 0.0
             
             # Robust account parsing
-            if 'accounts' in accounts:
-                acc_data = accounts['accounts']
-                
+            # Attempt to locate the account data structure
+            payload = accounts
+            if isinstance(accounts.get('result'), dict):
+                payload = accounts['result']
+            
+            acc_data = None
+            if 'accounts' in payload:
+                acc_data = payload['accounts']
+            elif 'flex' in payload:
+                # Fallback based on user hint: 'flex' might be at the root/result level
+                acc_data = payload
+            
+            if acc_data:
                 # Determine if it's a list or dict and get an iterator of OBJECTS
                 if isinstance(acc_data, dict):
                     acc_iterator = acc_data.values()
@@ -228,16 +238,26 @@ def fetch_worker():
                         elif 'usdt' in balances:
                             total_balance += float(balances.get('usdt', 0))
                     
-                    # Safe parsing for auxiliary
+                    # Safe parsing for equity
+                    # Check for 'marginEquity' (Futures), 'pv', or 'equity'
+                    val = 0.0
                     aux = acc.get('auxiliary', {})
-                    if isinstance(aux, dict):
-                        if 'pv' in aux:
-                            total_equity += float(aux.get('pv', 0))
-                        elif 'equity' in aux:
-                            total_equity += float(aux.get('equity', 0))
-                            
-                        if 'usedMargin' in aux:
-                            margin += float(aux.get('usedMargin', 0))
+                    if not isinstance(aux, dict):
+                        aux = {}
+
+                    if 'marginEquity' in acc:
+                        val = float(acc['marginEquity'])
+                    elif 'marginEquity' in aux:
+                        val = float(aux['marginEquity'])
+                    elif 'pv' in aux:
+                        val = float(aux.get('pv', 0))
+                    elif 'equity' in aux:
+                        val = float(aux.get('equity', 0))
+                    
+                    total_equity += val
+                        
+                    if 'usedMargin' in aux:
+                        margin += float(aux.get('usedMargin', 0))
 
             if total_equity == 0 and total_balance > 0:
                 total_equity = total_balance
