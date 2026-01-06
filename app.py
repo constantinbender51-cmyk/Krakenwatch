@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Company Primate - Professional Web Presence
--------------------------------------------
-Backend: Flask + SQLite + Kraken Futures API
+Company Primate - Clinical Backend
+----------------------------------
+Flask + SQLite + Kraken Futures API
 """
 
 import os
@@ -20,7 +20,7 @@ from datetime import datetime
 from typing import Dict, Any, Optional
 
 import requests
-from flask import Flask, render_template, jsonify, g, request
+from flask import Flask, render_template, jsonify, g
 
 # Configure Logging
 logging.basicConfig(
@@ -74,7 +74,7 @@ class KrakenFuturesApi:
         headers = {
             "APIKey": self.api_key,
             "Nonce": nonce,
-            "User-Agent": "Primate-Observatory/2.0",
+            "User-Agent": "Primate-Observatory/3.0",
         }
 
         if method.upper() == "POST":
@@ -133,7 +133,6 @@ def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     
-    # 1. Account History (Global Equity)
     c.execute('''CREATE TABLE IF NOT EXISTS account_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         timestamp REAL,
@@ -142,8 +141,6 @@ def init_db():
         margin_utilized REAL
     )''')
 
-    # 2. Symbol History (Per-symbol tracking)
-    # Value = size * price, PnL = current PnL
     c.execute('''CREATE TABLE IF NOT EXISTS symbol_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         timestamp REAL,
@@ -156,14 +153,12 @@ def init_db():
         pnl_usd REAL
     )''')
 
-    # 3. Current State (Latest API Dump)
     c.execute('''CREATE TABLE IF NOT EXISTS current_state (
         key TEXT PRIMARY KEY,
         data TEXT,
         updated_at REAL
     )''')
     
-    # Indexes for speed
     c.execute('CREATE INDEX IF NOT EXISTS idx_sym_hist_ts ON symbol_history(timestamp)')
     c.execute('CREATE INDEX IF NOT EXISTS idx_sym_hist_sym ON symbol_history(symbol)')
 
@@ -172,7 +167,6 @@ def init_db():
     logger.info(f"Database initialized at {DB_FILE}")
 
 def save_snapshot(equity, balance, margin, positions_list, tickers_list):
-    """Save global and per-symbol snapshots"""
     try:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
@@ -185,7 +179,6 @@ def save_snapshot(equity, balance, margin, positions_list, tickers_list):
         )
 
         # 2. Per Symbol
-        # Create a map of tickers for fast price lookup
         ticker_map = {t['symbol']: t.get('markPrice', 0) for t in tickers_list}
 
         for p in positions_list:
@@ -195,12 +188,10 @@ def save_snapshot(equity, balance, margin, positions_list, tickers_list):
             side = p.get('side', 'long')
             size = float(p.get('size', 0))
             entry_price = float(p.get('price', 0))
-            mark_price = float(ticker_map.get(symbol, entry_price)) # Fallback to entry if no ticker
+            mark_price = float(ticker_map.get(symbol, entry_price))
             
-            # Calculate Value in USD (Size * Mark Price)
             value_usd = size * mark_price
             
-            # PnL (API usually provides it, but we can calc approx if missing)
             pnl = float(p.get('pnl', 0))
             if pnl == 0 and size > 0:
                 if side == 'long':
@@ -248,26 +239,21 @@ def fetch_worker():
             orders_resp = api.get_open_orders()
             tickers_resp = api.get_tickers()
 
-            # Parse Tickers
             tickers = []
             if isinstance(tickers_resp, dict) and 'tickers' in tickers_resp:
                 tickers = tickers_resp['tickers']
 
-            # Parse Positions
             positions = []
             if isinstance(positions_resp, dict) and 'openPositions' in positions_resp:
                 positions = positions_resp['openPositions']
 
-            # Calculate Global Metrics
             total_equity = 0.0
             total_balance = 0.0
             margin = 0.0
             
-            # Account parsing logic
             payload = accounts.get('result', accounts) if isinstance(accounts, dict) else accounts
             acc_data = payload.get('accounts', payload) if isinstance(payload, dict) else payload
 
-            # Normalize acc_data to list
             acc_list = []
             if isinstance(acc_data, dict):
                 acc_list = acc_data.values()
@@ -276,24 +262,18 @@ def fetch_worker():
 
             for acc in acc_list:
                 if not isinstance(acc, dict): continue
-                
-                # Balance
                 bals = acc.get('balances', {})
                 if 'usd' in bals: total_balance += float(bals['usd'])
                 elif 'usdt' in bals: total_balance += float(bals['usdt'])
                 
-                # Equity
                 aux = acc.get('auxiliary', {})
                 val = float(acc.get('marginEquity', aux.get('marginEquity', aux.get('pv', aux.get('equity', 0)))))
                 total_equity += val
-                
-                # Margin
                 margin += float(aux.get('usedMargin', 0))
 
             if total_equity == 0 and total_balance > 0:
                 total_equity = total_balance
 
-            # Save Data
             save_snapshot(total_equity, total_balance, margin, positions, tickers)
             
             update_current_state('positions', positions)
@@ -333,15 +313,12 @@ def close_connection(exception):
 def index():
     return render_template('index.html')
 
-# --- APIs ---
-
 @app.route('/api/contact')
 def api_contact():
     return jsonify({'email': CONTACT_EMAIL})
 
 @app.route('/api/status')
 def api_status():
-    """Get current snapshot of everything"""
     try:
         conn = get_db()
         cur = conn.cursor()
@@ -357,29 +334,22 @@ def api_status():
 
 @app.route('/api/balance_history')
 def api_balance_history():
-    """Get global equity history for the Balance tab"""
     conn = get_db()
     cur = conn.cursor()
-    # Limit to ~24h (8640 points at 10s is too much, let's limit to 2000)
     cur.execute("SELECT timestamp, total_equity FROM account_history ORDER BY id DESC LIMIT 2000")
     rows = cur.fetchall()
     return jsonify([{'time': r['timestamp'], 'equity': r['total_equity']} for r in reversed(rows)])
 
 @app.route('/api/symbols_chart')
 def api_symbols_chart():
-    """
-    Get aggregated history for the Main Page Chart.
-    Returns: { 'symbol_A': [{time, value_usd}, ...], 'symbol_B': ... }
-    """
+    """Get history for all ever traded symbols"""
     conn = get_db()
     cur = conn.cursor()
-    # Get last 2000 entries of symbol history
-    # Note: simple query, client side will handle the multi-line logic
+    # Fetch last 5000 points of symbol data
     cur.execute("SELECT timestamp, symbol, value_usd FROM symbol_history ORDER BY id DESC LIMIT 5000")
     rows = cur.fetchall()
     
     result = {}
-    # Organize by symbol
     for row in reversed(rows):
         sym = row['symbol']
         if sym not in result:
@@ -390,11 +360,9 @@ def api_symbols_chart():
 
 @app.route('/api/symbol_detail/<symbol>')
 def api_symbol_detail(symbol):
-    """Get PnL history and orders for a specific symbol"""
     conn = get_db()
     cur = conn.cursor()
     
-    # 1. PnL History
     cur.execute(
         "SELECT timestamp, pnl_usd FROM symbol_history WHERE symbol = ? ORDER BY id DESC LIMIT 1000", 
         (symbol,)
@@ -402,10 +370,6 @@ def api_symbol_detail(symbol):
     pnl_rows = cur.fetchall()
     pnl_history = [{'x': r['timestamp'], 'y': r['pnl_usd']} for r in reversed(pnl_rows)]
     
-    # 2. Orders (Filter from current open orders)
-    # Note: We only have *open* orders in current_state. 
-    # If we wanted historical orders, we'd need to fetch fill history from API, 
-    # but for now we filter the cached open orders.
     cur.execute("SELECT data FROM current_state WHERE key = 'orders'")
     row = cur.fetchone()
     orders = []
@@ -418,13 +382,8 @@ def api_symbol_detail(symbol):
         'orders': orders
     })
 
-# ------------------------------------------------------------------
-# MAIN ENTRY
-# ------------------------------------------------------------------
 if __name__ == '__main__':
     t = threading.Thread(target=fetch_worker, daemon=True)
     t.start()
-    
     port = int(os.environ.get("PORT", 5000))
-    print(f"Company Primate Online on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
