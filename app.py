@@ -8,6 +8,7 @@ Restored full UI routing.
 
 UPDATES:
 - Integrated external 'kraken_futures_api.py' library.
+- Added 'get_order_events' fetching for the Log page.
 """
 
 import os
@@ -167,6 +168,14 @@ def fetch_worker():
             positions_resp = api.get_open_positions()
             orders_resp = api.get_open_orders()
             tickers_resp = api.get_tickers()
+            
+            # --- NEW: Fetch History for Log Page ---
+            try:
+                events_resp = api.get_order_events()
+                history = events_resp.get('elements', [])
+            except Exception as hist_e:
+                logger.error(f"Failed to fetch history: {hist_e}")
+                history = []
 
             tickers = tickers_resp.get('tickers', [])
             positions = positions_resp.get('openPositions', [])
@@ -227,6 +236,8 @@ def fetch_worker():
             update_current_state('positions', positions)
             update_current_state('orders', orders_resp.get('openOrders', []))
             update_current_state('tickers', tickers)
+            update_current_state('history', history) # Save history to DB
+            
             update_current_state('meta', {
                 'last_update': time.time(),
                 'equity': total_equity,
