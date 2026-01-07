@@ -283,7 +283,7 @@ def fetch_worker():
             save_snapshot(total_equity, total_balance, margin, positions, tickers)
             
             update_current_state('positions', positions)
-            update_current_state('orders', open_orders)
+            update_current_state('orders', open_orders_for_current_state)
             update_current_state('tickers', tickers)
             
             update_current_state('meta', {
