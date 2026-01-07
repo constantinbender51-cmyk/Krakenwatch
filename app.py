@@ -156,13 +156,12 @@ def save_snapshot(equity, balance, margin, positions_list, tickers_list):
 
 def save_found_orders(orders_list):
     """
-    Saves newly found open orders to the persistent history.
-    Uses INSERT OR IGNORE to avoid duplicates.
+    Saves newly found order events (history) to the persistent log.
+    Uses INSERT OR IGNORE to avoid duplicates based on order_id.
     """
     try:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
-        now = time.time()
         
         count = 0
         for o in orders_list:
@@ -170,19 +169,23 @@ def save_found_orders(orders_list):
             oid = o.get('orderId')
             if not oid: continue
             
-            symbol = o.get('symbol')
-            side = o.get('side', 'buy') # buy/sell
-            # Size can be 'size' or 'quantity' depending on API version
-            size = float(o.get('size', 0) or o.get('quantity', 0))
-            # Price can be 'limitPrice', 'stopPrice' or 'price'
-            price = float(o.get('limitPrice', 0) or o.get('stopPrice', 0) or o.get('price', 0))
-            otype = o.get('orderType', 'limit')
+            # Use Kraken's timestamp for historical accuracy, convert from ms to s
+            order_time_ms = o.get('timestamp')
+            # Fallback to current time if timestamp is missing or invalid
+            order_timestamp = float(order_time_ms) / 1000 if isinstance(order_time_ms, (int, float)) else time.time()
+            
+            symbol = o.get('tradeable') # Use 'tradeable' for symbol in history API
+            side = o.get('direction', 'buy') # Use 'direction' for side in history API
+            size = float(o.get('quantity', 0)) # Use 'quantity' for size in history API
+            # Price for history items can be 'limitPrice', 'stopPrice', 'price', or 'fillPrice'
+            # Prioritize limitPrice, then fillPrice, default to 0 if not found.
+            price = float(o.get('limitPrice', 0) or o.get('fillPrice', 0))
+            otype = o.get('orderType', 'limit') # e.g., 'Limit', 'Market', 'Stop', 'TakeProfit'
 
-            # We only save new orders. If ID exists, we ignore it.
             c.execute('''INSERT OR IGNORE INTO order_log 
                 (order_id, timestamp, symbol, side, size, price, order_type, raw_data)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)''', 
-                (oid, now, symbol, side, size, price, otype, json.dumps(o)))
+                (oid, order_timestamp, symbol, side, size, price, otype, json.dumps(o)))
             
             if c.rowcount > 0:
                 count += 1
@@ -190,7 +193,7 @@ def save_found_orders(orders_list):
         conn.commit()
         conn.close()
         if count > 0:
-            logger.info(f"New orders archived: {count}")
+            logger.info(f"New order events archived: {count}")
             
     except Exception as e:
         logger.error(f"DB Write Error (Order Log): {e}")
