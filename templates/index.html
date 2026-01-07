@@ -41,7 +41,7 @@
 
         @media (min-width: 768px) {
             body {
-                background-size: 600px auto; /* Constrain on desktop to keep it looking like a header/logo */
+                background-size: 600px auto;
             }
         }
         
@@ -58,10 +58,6 @@
             font-weight: 200; 
             font-size: 2.25rem; letter-spacing: 0.4em;
             text-transform: uppercase; color: #1a1a1a;
-            
-            /* Hide the text visually so the background image text shows through, 
-               but keep the element for layout/clicking if needed, or just let the image be the brand.
-            */
             opacity: 0; 
         }
         
@@ -99,15 +95,17 @@
 </head>
 <body class="antialiased min-h-screen">
 
-    <!-- Keep the home click target, but the text is now invisible via CSS -->
+    <!-- Header / Logo Click Area -->
     <div class="fixed top-8 left-1/2 transform -translate-x-1/2 z-50 cursor-pointer select-none" onclick="router.navigate('home')">
         <h1 class="brand-text">Primate</h1>
     </div>
 
+    <!-- Burger Menu Icon -->
     <div class="fixed top-8 right-6 z-50 cursor-pointer p-2 hover:bg-gray-50 rounded-full" onclick="toggleMenu()">
         <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-gray-400 hover:text-black transition"><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle><circle cx="5" cy="12" r="1"></circle></svg>
     </div>
 
+    <!-- Menu Panel -->
     <div class="menu-backdrop" id="menu-backdrop" onclick="toggleMenu()"></div>
     <div class="menu-overlay" id="menu-panel">
         <div class="flex flex-col space-y-6 mt-12">
@@ -120,6 +118,7 @@
 
     <div class="page-container">
 
+        <!-- HOME VIEW -->
         <div id="view-home" class="view-section active">
             <div class="mb-12">
                 <div class="h-[400px] w-full relative">
@@ -132,6 +131,7 @@
             </div>
         </div>
 
+        <!-- SYMBOL DETAIL VIEW -->
         <div id="view-symbol" class="view-section">
             <div class="content-pad">
                 <div class="mb-8 cursor-pointer text-gray-400 hover:text-black text-sm w-max" onclick="router.navigate('home')">
@@ -151,7 +151,7 @@
             </div>
 
             <div class="content-pad">
-                <h3 class="text-xs uppercase text-gray-400 mb-4 tracking-widest">Order History</h3>
+                <h3 class="text-xs uppercase text-gray-400 mb-4 tracking-widest">Active Orders</h3>
                 <table class="clean-table">
                     <thead>
                         <tr>
@@ -167,6 +167,7 @@
             </div>
         </div>
 
+        <!-- BALANCE VIEW -->
         <div id="view-balance" class="view-section">
             <div class="content-pad mb-8 text-sm text-gray-400">Portfolio Value</div>
             <div class="h-[500px] w-full relative">
@@ -174,9 +175,10 @@
             </div>
         </div>
 
+        <!-- LOG VIEW (History) -->
         <div id="view-log" class="view-section">
             <div class="content-pad">
-                <div class="mb-8 text-sm text-gray-400">Order History</div>
+                <div class="mb-8 text-sm text-gray-400">System Log (Order History)</div>
                 <table class="clean-table">
                     <thead>
                         <tr>
@@ -185,15 +187,15 @@
                             <th>Side</th>
                             <th>Size</th>
                             <th>Price</th>
-                            <th>Status</th>
                         </tr>
                     </thead>
                     <tbody id="log-table-body"></tbody>
                 </table>
-                <div id="log-empty" class="py-12 text-center text-gray-400 font-mono hidden">No orders found.</div>
+                <div id="log-empty" class="py-12 text-center text-gray-400 font-mono hidden">No events found.</div>
             </div>
         </div>
 
+        <!-- CONTACT VIEW -->
         <div id="view-contact" class="view-section">
             <div class="flex flex-col items-center justify-center h-[60vh] content-pad">
                 <div class="text-sm text-gray-400 mb-2">Contact</div>
@@ -274,13 +276,12 @@
         };
 
         async function loadHomeData() {
-            // Mock Data for preview if API fails
+            // Fallback mock data
             let chartData;
             try {
                 const chartRes = await fetch('/api/symbols_chart');
                 chartData = await chartRes.json();
             } catch (e) {
-                // Fallback mock
                 chartData = {
                     'BTC': { invested: Array.from({length: 20}, (_, i) => ({x: Date.now()/1000 - (20-i)*3600, y: 30000 + Math.random()*1000})) },
                     'ETH': { invested: Array.from({length: 20}, (_, i) => ({x: Date.now()/1000 - (20-i)*3600, y: 2000 + Math.random()*100})) }
@@ -296,8 +297,7 @@
                     invested: investedData.map(pt => ({x: pt.x * 1000, y: pt.y}))
                 };
             });
-            // Sort by value (Descending) so larger areas are drawn first (in the back)
-            // ensuring the white fill works as a proper mask for the background
+            // Sort by value (Descending), so large areas are drawn first (in the back)
             symbolsArray.sort((a, b) => b.lastVal - a.lastVal);
 
             const grid = document.getElementById('symbol-links-container');
@@ -320,9 +320,6 @@
                     borderColor: `rgba(0,0,0, ${0.8 - (idx * 0.15)})`, 
                     borderWidth: 2,
                     stepped: true,
-                    
-                    // Mask the background image below the line using solid white
-                    // Since we sorted largest to smallest, this stacks correctly
                     fill: 'start',      
                     backgroundColor: '#ffffff' 
                 };
@@ -364,34 +361,26 @@
         }
 
         async function loadLogData() {
-            let orders = [];
+            let history = [];
             try {
-                // Fetch active or historical orders
-                const res = await fetch('/api/orders');
-                orders = await res.json();
+                const res = await fetch('/api/status');
+                const data = await res.json();
+                history = data.history || [];
             } catch (e) {
-                // Mock Order Data
-                orders = [
-                    { timestamp: Date.now() - 600000, symbol: 'BTC', type: 'LIMIT', side: 'buy', size: '0.05', price: '29800', status: 'FILLED' },
-                    { timestamp: Date.now() - 1200000, symbol: 'ETH', type: 'MARKET', side: 'sell', size: '2.5', price: 'MKT', status: 'CANCELED' },
-                    { timestamp: Date.now() - 3600000, symbol: 'SOL', type: 'LIMIT', side: 'buy', size: '100', price: '20.50', status: 'OPEN' }
-                ];
+                history = [];
             }
             
             const tbody = document.getElementById('log-table-body');
             
-            if (orders && orders.length > 0) {
-                // Sort by time descending
-                orders.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
-
-                tbody.innerHTML = orders.map(item => {
-                    const time = item.timestamp || item.time || Date.now();
+            if (history.length > 0) {
+                tbody.innerHTML = history.map(item => {
+                    // Backend now returns flat objects from the 'order_log' table
+                    const time = item.timestamp * 1000;
                     const type = item.type || 'LIMIT';
                     const side = item.side ? item.side.toLowerCase() : '--';
                     const symbol = item.symbol || '--';
-                    const size = item.size || item.quantity || '--';
-                    const price = item.limitPrice || item.price || 'MKT';
-                    const status = item.status || 'NEW';
+                    const size = item.size || '--';
+                    const price = item.price || 'MKT';
                     
                     const sideClass = side === 'buy' ? 'text-green-700' : (side === 'sell' ? 'text-red-700' : 'text-gray-600');
                     
@@ -405,7 +394,6 @@
                         <td class="${sideClass} uppercase font-medium text-xs">${side}</td>
                         <td class="text-gray-700 font-mono">${size}</td>
                         <td class="text-gray-700 font-mono text-xs">${price !== 'MKT' ? '$' + price : price}</td>
-                        <td class="text-gray-400 text-xs uppercase font-mono">${status}</td>
                     </tr>
                 `;
                 }).join('');
@@ -413,6 +401,7 @@
             } else {
                 tbody.innerHTML = '';
                 document.getElementById('log-empty').classList.remove('hidden');
+                document.getElementById('log-empty').innerText = "No history found.";
             }
         }
 
@@ -453,15 +442,23 @@
             });
 
             const ordBody = document.getElementById('detail-orders-body');
-            ordBody.innerHTML = orders.map(o => `
-                <tr>
-                    <td class="uppercase text-xs tracking-wider">${o.orderType}</td>
-                    <td class="${o.side === 'buy' ? 'text-green-700' : 'text-red-700'}">${o.side}</td>
-                    <td class="font-mono">${o.size}</td>
-                    <td class="font-mono">$${o.limitPrice || o.stopPrice || 'MKT'}</td>
-                </tr>
-            `).join('');
-            document.getElementById('detail-orders-empty').classList.toggle('hidden', orders.length > 0);
+            // Here we continue to show only ACTIVE (Open) Orders, 
+            // as this makes the most sense for a symbol detail view.
+            // The complete history is in the Log.
+            if (orders.length > 0) {
+                ordBody.innerHTML = orders.map(o => `
+                    <tr>
+                        <td class="uppercase text-xs tracking-wider">${o.orderType}</td>
+                        <td class="${o.side === 'buy' ? 'text-green-700' : 'text-red-700'}">${o.side}</td>
+                        <td class="font-mono">${o.size || o.quantity}</td>
+                        <td class="font-mono">$${o.limitPrice || o.stopPrice || 'MKT'}</td>
+                    </tr>
+                `).join('');
+                document.getElementById('detail-orders-empty').classList.add('hidden');
+            } else {
+                ordBody.innerHTML = '';
+                document.getElementById('detail-orders-empty').classList.remove('hidden');
+            }
         }
 
         async function loadContactData() {
