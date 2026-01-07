@@ -239,9 +239,10 @@
                 y: { 
                     display: true, 
                     grid: { 
-                        display: true,
-                        drawTicks: true
+                        display: false,
+                        drawTicks: false
                     },
+                    drawBorder: false, /* Removes the y-axis line */
                     offset: false,
                     ticks: {
                         maxTicksLimit: 11, 
@@ -253,7 +254,7 @@
             plugins: { legend: { display: false } },
             elements: {
                 point: { radius: 0, hitRadius: 40, hoverRadius: 4 }, 
-                line: { borderWidth: 2 } 
+                line: { borderWidth: 0 } /* Removes the data lines */
             }
         };
 
@@ -357,7 +358,7 @@
                     datasets: [{
                         data: points,
                         borderColor: '#000000',
-                        borderWidth: 2,
+                        borderWidth: 0,
                         fill: 'start',      
                         backgroundColor: 'rgba(255, 255, 255, 1)', 
                         stepped: true
@@ -439,7 +440,7 @@
                     datasets: [{
                         data: history.map(d => ({ x: d.x * 1000, y: d.y })),
                         borderColor: '#000000',
-                        borderWidth: 2,
+                        borderWidth: 0,
                         fill: 'start',
                         backgroundColor: 'rgba(255, 255, 255, 1)', 
                         stepped: true
