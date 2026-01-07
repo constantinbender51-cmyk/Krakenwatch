@@ -8,7 +8,8 @@ Restored full UI routing.
 
 UPDATES:
 - Integrated external 'kraken_futures.py' library.
-- Switched Log Page source from 'order_events' (deprecated) to 'open_orders'.
+- Log Page now shows a cumulative history of all open orders ever found.
+- Language reverted to English.
 """
 
 import os
@@ -24,7 +25,6 @@ from typing import Dict, Any, Optional
 from flask import Flask, render_template, jsonify, g
 
 # --- IMPORT EXTERNAL LIBRARY ---
-# Assumes the file provided is named 'kraken_futures.py'
 try:
     from kraken_futures import KrakenFuturesApi
 except ImportError:
@@ -72,6 +72,7 @@ def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     
+    # Table for account balance history
     c.execute('''CREATE TABLE IF NOT EXISTS account_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         timestamp REAL,
@@ -80,6 +81,7 @@ def init_db():
         margin_utilized REAL
     )''')
 
+    # Table for symbol history (prices/pnl)
     c.execute('''CREATE TABLE IF NOT EXISTS symbol_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         timestamp REAL,
@@ -91,7 +93,20 @@ def init_db():
         value_usd REAL,
         pnl_usd REAL
     )''')
+    
+    # NEW: Table for order log (cumulative history of open orders)
+    c.execute('''CREATE TABLE IF NOT EXISTS order_log (
+        order_id TEXT PRIMARY KEY,
+        timestamp REAL,
+        symbol TEXT,
+        side TEXT,
+        size REAL,
+        price REAL,
+        order_type TEXT,
+        raw_data TEXT
+    )''')
 
+    # Table for current state (State Store)
     c.execute('''CREATE TABLE IF NOT EXISTS current_state (
         key TEXT PRIMARY KEY,
         data TEXT,
@@ -100,6 +115,7 @@ def init_db():
     
     c.execute('CREATE INDEX IF NOT EXISTS idx_sym_hist_ts ON symbol_history(timestamp)')
     c.execute('CREATE INDEX IF NOT EXISTS idx_sym_hist_sym ON symbol_history(symbol)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_order_log_ts ON order_log(timestamp)')
     conn.commit()
     conn.close()
 
@@ -136,7 +152,48 @@ def save_snapshot(equity, balance, margin, positions_list, tickers_list):
         conn.commit()
         conn.close()
     except Exception as e:
-        logger.error(f"DB Write Error: {e}")
+        logger.error(f"DB Write Error (Snapshot): {e}")
+
+def save_found_orders(orders_list):
+    """
+    Saves newly found open orders to the persistent history.
+    Uses INSERT OR IGNORE to avoid duplicates.
+    """
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        now = time.time()
+        
+        count = 0
+        for o in orders_list:
+            # Kraken Futures Order ID
+            oid = o.get('orderId')
+            if not oid: continue
+            
+            symbol = o.get('symbol')
+            side = o.get('side', 'buy') # buy/sell
+            # Size can be 'size' or 'quantity' depending on API version
+            size = float(o.get('size', 0) or o.get('quantity', 0))
+            # Price can be 'limitPrice', 'stopPrice' or 'price'
+            price = float(o.get('limitPrice', 0) or o.get('stopPrice', 0) or o.get('price', 0))
+            otype = o.get('orderType', 'limit')
+
+            # We only save new orders. If ID exists, we ignore it.
+            c.execute('''INSERT OR IGNORE INTO order_log 
+                (order_id, timestamp, symbol, side, size, price, order_type, raw_data)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)''', 
+                (oid, now, symbol, side, size, price, otype, json.dumps(o)))
+            
+            if c.rowcount > 0:
+                count += 1
+                
+        conn.commit()
+        conn.close()
+        if count > 0:
+            logger.info(f"New orders archived: {count}")
+            
+    except Exception as e:
+        logger.error(f"DB Write Error (Order Log): {e}")
 
 def update_current_state(key, data):
     try:
@@ -156,54 +213,39 @@ def update_current_state(key, data):
 # ------------------------------------------------------------------
 def fetch_worker():
     logger.info("Starting background fetcher...")
-    # Initialize the imported library class
     api = KrakenFuturesApi(API_KEY, API_SECRET)
 
     while True:
         try:
             start_time = time.time()
             
-            # The external library raises RuntimeError on failure, which is caught below.
             accounts_resp = api.get_accounts()
             positions_resp = api.get_open_positions()
             orders_resp = api.get_open_orders()
             tickers_resp = api.get_tickers()
             
-            # --- UPDATED: Use Open Orders for Log Page History ---
-            # The previous 'get_order_events' is not available in the updated lib.
-            # We map open orders to the 'history' state key.
-            try:
-                # Retrieve open orders list
-                open_orders = orders_resp.get('openOrders', [])
-                
-                # We treat the current snapshot of open orders as our "Log" for now.
-                # In a more complex app, we might merge this with 'recentorders' or 'fills'.
-                history = open_orders
-                
-            except Exception as hist_e:
-                logger.error(f"Failed to process history from orders: {hist_e}")
-                history = []
+            # --- ORDER HISTORY LOGIC ---
+            # Capture currently open orders and persist them
+            open_orders = orders_resp.get('openOrders', [])
+            save_found_orders(open_orders)
+            # ---------------------------
 
             tickers = tickers_resp.get('tickers', [])
             positions = positions_resp.get('openPositions', [])
 
-            # --- CALCULATE PNL MANUALLY ---
-            # Kraken REST API does not provide 'pnl' in openPositions, so we compute it.
-            # Map symbol -> Mark Price
+            # --- PNL CALCULATION ---
             mark_map = {t['symbol']: float(t.get('markPrice', 0)) for t in tickers if 'symbol' in t}
 
             for p in positions:
                 symbol = p.get('symbol')
                 if not symbol: continue
                 
-                # Extract values
                 try:
                     entry_price = float(p.get('price', 0))
                     size = float(p.get('size', 0))
                     side = p.get('side', 'long')
                     mark_price = mark_map.get(symbol, entry_price)
 
-                    # Standard Linear PnL Calculation
                     if side == 'long':
                         calculated_pnl = (mark_price - entry_price) * size
                     else:
@@ -220,18 +262,15 @@ def fetch_worker():
             
             res = accounts_resp.get('accounts', {})
             
-            # CRITICAL FIX: Extracting "Flex Margin Equity"
             if 'flex' in res:
                 flex_acc = res['flex']
                 total_equity = float(flex_acc.get('marginEquity', 0))
                 total_balance = float(flex_acc.get('balance', 0))
                 
                 aux = flex_acc.get('auxiliary', {})
-                # Some API versions put margin in root, some in auxiliary
                 margin = float(flex_acc.get('marginUsed', aux.get('usedMargin', 0)))
                 logger.info(f"Flex Sync: Equity=${total_equity:.2f}")
             else:
-                # Fallback iterate
                 for acc_key, acc_val in res.items():
                     if isinstance(acc_val, dict):
                         total_equity += float(acc_val.get('marginEquity', 0))
@@ -241,9 +280,8 @@ def fetch_worker():
             save_snapshot(total_equity, total_balance, margin, positions, tickers)
             
             update_current_state('positions', positions)
-            update_current_state('orders', orders_resp.get('openOrders', []))
+            update_current_state('orders', open_orders)
             update_current_state('tickers', tickers)
-            update_current_state('history', history) # Save modified history to DB
             
             update_current_state('meta', {
                 'last_update': time.time(),
@@ -253,7 +291,6 @@ def fetch_worker():
             })
 
         except Exception as e:
-            # The new library raises exceptions on API errors; we log them here.
             logger.error(f"Error in fetch loop: {e}", exc_info=True)
 
         elapsed = time.time() - start_time
@@ -275,7 +312,6 @@ def close_connection(exception):
 
 @app.route('/')
 def index():
-    # Restore the frontend
     return render_template('index.html')
 
 @app.route('/api/contact')
@@ -284,18 +320,43 @@ def api_contact():
 
 @app.route('/api/status')
 def api_status():
+    """
+    Returns status for the Log page.
+    Now retrieves real history from the 'order_log' database table.
+    """
     try:
         conn = get_db()
+        conn.row_factory = sqlite3.Row
         cur = conn.cursor()
-        cur.execute("SELECT key, data, updated_at FROM current_state")
+        
+        # Get the last 100 orders from the persistent history
+        cur.execute("SELECT * FROM order_log ORDER BY timestamp DESC LIMIT 100")
         rows = cur.fetchall()
-        data = {}
+        
+        history = []
         for row in rows:
-            data[row['key']] = json.loads(row['data'])
-            data[row['key']]['_updated'] = row['updated_at']
-        return jsonify(data)
-    except:
-        return jsonify({}), 500
+            history.append({
+                'order_id': row['order_id'],
+                'timestamp': row['timestamp'],
+                'symbol': row['symbol'],
+                'side': row['side'],
+                'size': row['size'],
+                'price': row['price'],
+                'type': row['order_type']
+            })
+            
+        # Optional: Get Meta data
+        cur.execute("SELECT data FROM current_state WHERE key = 'meta'")
+        meta_row = cur.fetchone()
+        meta = json.loads(meta_row['data']) if meta_row else {}
+
+        return jsonify({
+            'history': history,
+            'meta': meta
+        })
+    except Exception as e:
+        logger.error(f"API Status Error: {e}")
+        return jsonify({'history': [], 'error': str(e)}), 500
 
 @app.route('/api/balance_history')
 def api_balance_history():
@@ -327,6 +388,7 @@ def api_symbol_detail(symbol):
     cur.execute("SELECT timestamp, pnl_usd FROM symbol_history WHERE symbol = ? ORDER BY id ASC", (symbol,))
     pnl_rows = cur.fetchall()
     
+    # Active orders for the symbol page
     cur.execute("SELECT data FROM current_state WHERE key = 'orders'")
     row = cur.fetchone()
     orders = []
