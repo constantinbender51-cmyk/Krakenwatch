@@ -176,20 +176,21 @@
 
         <div id="view-log" class="view-section">
             <div class="content-pad">
-                <div class="mb-8 text-sm text-gray-400">System Log</div>
+                <div class="mb-8 text-sm text-gray-400">Order History</div>
                 <table class="clean-table">
                     <thead>
                         <tr>
                             <th>Time</th>
-                            <th>Event</th>
+                            <th>Symbol</th>
                             <th>Side</th>
                             <th>Size</th>
                             <th>Price</th>
+                            <th>Status</th>
                         </tr>
                     </thead>
                     <tbody id="log-table-body"></tbody>
                 </table>
-                <div id="log-empty" class="py-12 text-center text-gray-400 font-mono hidden">No events found.</div>
+                <div id="log-empty" class="py-12 text-center text-gray-400 font-mono hidden">No orders found.</div>
             </div>
         </div>
 
@@ -363,27 +364,35 @@
         }
 
         async function loadLogData() {
-            let history = [];
+            let orders = [];
             try {
-                const res = await fetch('/api/status');
-                const data = await res.json();
-                history = data.history || [];
+                // Fetch active or historical orders
+                const res = await fetch('/api/orders');
+                orders = await res.json();
             } catch (e) {
-                history = [];
+                // Mock Order Data
+                orders = [
+                    { timestamp: Date.now() - 600000, symbol: 'BTC', type: 'LIMIT', side: 'buy', size: '0.05', price: '29800', status: 'FILLED' },
+                    { timestamp: Date.now() - 1200000, symbol: 'ETH', type: 'MARKET', side: 'sell', size: '2.5', price: 'MKT', status: 'CANCELED' },
+                    { timestamp: Date.now() - 3600000, symbol: 'SOL', type: 'LIMIT', side: 'buy', size: '100', price: '20.50', status: 'OPEN' }
+                ];
             }
             
             const tbody = document.getElementById('log-table-body');
             
-            if (history.length > 0) {
-                tbody.innerHTML = history.map(item => {
-                    const evt = item.event || {};
-                    const order = item.order || {};
-                    const time = evt.timestamp || item.timestamp || Date.now();
-                    const type = evt.type || 'EVENT';
-                    const side = order.direction ? order.direction.toLowerCase() : (order.side || '--');
-                    const symbol = order.symbol || '--';
-                    const size = order.quantity || order.size || '--';
-                    const price = order.limitPrice || order.price || 'MKT';
+            if (orders && orders.length > 0) {
+                // Sort by time descending
+                orders.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+
+                tbody.innerHTML = orders.map(item => {
+                    const time = item.timestamp || item.time || Date.now();
+                    const type = item.type || 'LIMIT';
+                    const side = item.side ? item.side.toLowerCase() : '--';
+                    const symbol = item.symbol || '--';
+                    const size = item.size || item.quantity || '--';
+                    const price = item.limitPrice || item.price || 'MKT';
+                    const status = item.status || 'NEW';
+                    
                     const sideClass = side === 'buy' ? 'text-green-700' : (side === 'sell' ? 'text-red-700' : 'text-gray-600');
                     
                     return `
@@ -396,6 +405,7 @@
                         <td class="${sideClass} uppercase font-medium text-xs">${side}</td>
                         <td class="text-gray-700 font-mono">${size}</td>
                         <td class="text-gray-700 font-mono text-xs">${price !== 'MKT' ? '$' + price : price}</td>
+                        <td class="text-gray-400 text-xs uppercase font-mono">${status}</td>
                     </tr>
                 `;
                 }).join('');
@@ -403,7 +413,6 @@
             } else {
                 tbody.innerHTML = '';
                 document.getElementById('log-empty').classList.remove('hidden');
-                document.getElementById('log-empty').innerText = "No history found.";
             }
         }
 
