@@ -7,8 +7,8 @@ Targeting Flex Margin Equity specifically for balance tracking.
 Restored full UI routing.
 
 UPDATES:
-- Integrated external 'kraken_futures_api.py' library.
-- Added 'get_order_events' fetching for the Log page.
+- Integrated external 'kraken_futures.py' library.
+- Switched Log Page source from 'order_events' (deprecated) to 'open_orders'.
 """
 
 import os
@@ -169,12 +169,19 @@ def fetch_worker():
             orders_resp = api.get_open_orders()
             tickers_resp = api.get_tickers()
             
-            # --- NEW: Fetch History for Log Page ---
+            # --- UPDATED: Use Open Orders for Log Page History ---
+            # The previous 'get_order_events' is not available in the updated lib.
+            # We map open orders to the 'history' state key.
             try:
-                events_resp = api.get_order_events()
-                history = events_resp.get('elements', [])
+                # Retrieve open orders list
+                open_orders = orders_resp.get('openOrders', [])
+                
+                # We treat the current snapshot of open orders as our "Log" for now.
+                # In a more complex app, we might merge this with 'recentorders' or 'fills'.
+                history = open_orders
+                
             except Exception as hist_e:
-                logger.error(f"Failed to fetch history: {hist_e}")
+                logger.error(f"Failed to process history from orders: {hist_e}")
                 history = []
 
             tickers = tickers_resp.get('tickers', [])
@@ -236,7 +243,7 @@ def fetch_worker():
             update_current_state('positions', positions)
             update_current_state('orders', orders_resp.get('openOrders', []))
             update_current_state('tickers', tickers)
-            update_current_state('history', history) # Save history to DB
+            update_current_state('history', history) # Save modified history to DB
             
             update_current_state('meta', {
                 'last_update': time.time(),
