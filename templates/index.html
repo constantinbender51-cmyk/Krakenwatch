@@ -237,24 +237,19 @@
                     bounds: 'data'
                 },
                 y: { 
-                    display: true, 
+                    display: false, 
                     grid: { 
                         display: false,
                         drawTicks: false
                     },
                     drawBorder: false, /* Removes the y-axis line */
-                    offset: false,
-                    ticks: {
-                        maxTicksLimit: 11, 
-                        crossAlign: 'near',
-                        padding: 10
-                    }
+                    offset: false
                 }
             },
             plugins: { legend: { display: false } },
             elements: {
                 point: { radius: 0, hitRadius: 40, hoverRadius: 4 }, 
-                line: { borderWidth: 0 } /* Removes the data lines */
+                line: { borderWidth: 2 } /* Makes the data lines visible */
             }
         };
 
