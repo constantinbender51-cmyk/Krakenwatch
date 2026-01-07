@@ -139,7 +139,7 @@
                 </div>
                 
                 <div class="flex justify-between items-baseline mb-12">
-                    <h1 class="text-4xl font-extralight text-black" id="detail-title">--</h1>
+                    <h1 class="text-4xl font-light text-black" id="detail-title">--</h1>
                     <div class="text-xl font-light font-mono" id="detail-pnl">--</div>
                 </div>
             </div>
@@ -238,18 +238,14 @@
                 },
                 y: { 
                     display: false, 
-                    grid: { 
-                        display: false,
-                        drawTicks: false
-                    },
-                    drawBorder: false, /* Removes the y-axis line */
-                    offset: false
+                    grid: { display: false },
+                    offset: false 
                 }
             },
             plugins: { legend: { display: false } },
             elements: {
                 point: { radius: 0, hitRadius: 40, hoverRadius: 4 }, 
-                line: { borderWidth: 2 } /* Makes the data lines visible */
+                line: { borderWidth: 2 } 
             }
         };
 
@@ -320,11 +316,11 @@
                 return {
                     label: item.sym,
                     data: item.invested,
-                    borderColor: '#000000', 
+                    borderColor: `rgba(0,0,0, ${0.8 - (idx * 0.15)})`, 
                     borderWidth: 2,
                     stepped: true,
                     fill: 'start',      
-                    backgroundColor: 'rgba(255, 255, 255, 1)' 
+                    backgroundColor: '#ffffff' 
                 };
             });
 
@@ -353,9 +349,9 @@
                     datasets: [{
                         data: points,
                         borderColor: '#000000',
-                        borderWidth: 0,
+                        borderWidth: 2,
                         fill: 'start',      
-                        backgroundColor: 'rgba(255, 255, 255, 1)', 
+                        backgroundColor: '#ffffff', 
                         stepped: true
                     }]
                 },
@@ -435,9 +431,9 @@
                     datasets: [{
                         data: history.map(d => ({ x: d.x * 1000, y: d.y })),
                         borderColor: '#000000',
-                        borderWidth: 0,
+                        borderWidth: 2,
                         fill: 'start',
-                        backgroundColor: 'rgba(255, 255, 255, 1)', 
+                        backgroundColor: '#ffffff', 
                         stepped: true
                     }]
                 },
@@ -453,7 +449,7 @@
                     <tr>
                         <td class="uppercase text-xs tracking-wider">${o.orderType}</td>
                         <td class="${o.side === 'buy' ? 'text-green-700' : 'text-red-700'}">${o.side}</td>
-                        <td class="font-mono">${o.unfilledSize}</td>
+                        <td class="font-mono">${o.size || o.quantity}</td>
                         <td class="font-mono">$${o.limitPrice || o.stopPrice || 'MKT'}</td>
                     </tr>
                 `).join('');
@@ -478,4 +474,3 @@
     </script>
 </body>
 </html>
-
