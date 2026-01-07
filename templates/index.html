@@ -228,52 +228,24 @@
             layout: { padding: 0 }, 
             interaction: { intersect: false, mode: 'index' },
             scales: {
-                x: {
-                    type: 'time',
-                    time: { unit: 'minute' },
-                    display: false,
+                x: { 
+                    type: 'time', 
+                    time: { unit: 'minute' }, 
+                    display: false, 
                     grid: { display: false },
                     offset: false,
                     bounds: 'data'
                 },
-                y: {
-                    display: false,
+                y: { 
+                    display: false, 
                     grid: { display: false },
-                    offset: false
+                    offset: false 
                 }
             },
             plugins: { legend: { display: false } },
             elements: {
                 point: { radius: 0, hitRadius: 40, hoverRadius: 4 }, 
-                line: { borderWidth: 2 }
-            }
-        };
-
-        // Removed the overlayGridPlugin as it was adding unwanted horizontal lines.
-        // No new plugin is needed for basic chart functionality.
-
-        const chartInstances = {
-            id: 'overlayGrid',
-            afterDatasetsDraw: (chart) => {
-                const { ctx, chartArea: { top, bottom, left, right, height } } = chart;
-                ctx.save();
-                ctx.beginPath();
-                ctx.strokeStyle = '#1a1a1a'; // Completely opaque
-                ctx.lineWidth = 1;
-
-                // Divide space into 10 sections
-                const count = 10;
-                const step = height / count;
-                
-                // Draw 10 lines (skipping the very top, drawing down to the bottom)
-                for (let i = 1; i <= count; i++) {
-                    const y = top + (step * i);
-                    ctx.moveTo(left, y);
-                    ctx.lineTo(right, y);
-                }
-                
-                ctx.stroke();
-                ctx.restore();
+                line: { borderWidth: 2 } 
             }
         };
 
@@ -356,8 +328,7 @@
             chartInstances.home = new Chart(document.getElementById('homeChart'), {
                 type: 'line',
                 data: { datasets },
-                options: minimalChartOptions,
-                // No custom plugins needed here anymore
+                options: minimalChartOptions
             });
         }
 
@@ -466,8 +437,7 @@
                         stepped: true
                     }]
                 },
-                options: minimalChartOptions,
-                plugins: [] // No custom plugins needed
+                options: minimalChartOptions
             });
 
             const ordBody = document.getElementById('detail-orders-body');
@@ -511,3 +481,5 @@
     </script>
 </body>
 </html>
+
+
