@@ -237,9 +237,17 @@
                     bounds: 'data'
                 },
                 y: { 
-                    display: false, 
-                    grid: { display: false },
-                    offset: false 
+                    display: true, 
+                    grid: { 
+                        display: true,
+                        drawTicks: true
+                    },
+                    offset: false,
+                    ticks: {
+                        maxTicksLimit: 11, 
+                        crossAlign: 'near',
+                        padding: 10
+                    }
                 }
             },
             plugins: { legend: { display: false } },
