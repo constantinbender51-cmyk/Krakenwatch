@@ -88,6 +88,386 @@
         .menu-backdrop {
             position: fixed; top: 0; left: 0; width: 100%; height: 100%;
             background: rgba(255,255,255,0.8); backdrop-filter: blur(2px);
-            opacity: 0; pointer-events: none; transition
+            opacity: 0; pointer-events: none; transition: opacity 0.3s; z-index: 90;
+        }
+        .menu-backdrop.open { opacity: 1; pointer-events: auto; }
+        
+        /* SPA Transitions */
+        .view-section { display: none; opacity: 0; transition: opacity 0.15s ease-in-out; }
+        .view-section.active { display: block; opacity: 1; }
+    </style>
+</head>
+<body class="antialiased min-h-screen">
 
+    <!-- Keep the home click target, but the text is now invisible via CSS -->
+    <div class="fixed top-8 left-1/2 transform -translate-x-1/2 z-50 cursor-pointer select-none" onclick="router.navigate('home')">
+        <h1 class="brand-text">Primate</h1>
+    </div>
 
+    <div class="fixed top-8 right-6 z-50 cursor-pointer p-2 hover:bg-gray-50 rounded-full" onclick="toggleMenu()">
+        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-gray-400 hover:text-black transition"><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle><circle cx="5" cy="12" r="1"></circle></svg>
+    </div>
+
+    <div class="menu-backdrop" id="menu-backdrop" onclick="toggleMenu()"></div>
+    <div class="menu-overlay" id="menu-panel">
+        <div class="flex flex-col space-y-6 mt-12">
+            <a onclick="router.navigate('home'); toggleMenu()" class="clinical-link">Home</a>
+            <a onclick="router.navigate('balance'); toggleMenu()" class="clinical-link">Balance</a>
+            <a onclick="router.navigate('log'); toggleMenu()" class="clinical-link">Log / Orders</a>
+            <a onclick="router.navigate('contact'); toggleMenu()" class="clinical-link">Contact</a>
+        </div>
+    </div>
+
+    <div class="page-container">
+
+        <div id="view-home" class="view-section active">
+            <div class="mb-12">
+                <div class="h-[400px] w-full relative">
+                    <canvas id="homeChart"></canvas>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-6 content-pad" id="symbol-links-container">
+                <div class="text-center text-gray-300 text-sm col-span-full font-mono">Loading assets...</div>
+            </div>
+        </div>
+
+        <div id="view-symbol" class="view-section">
+            <div class="content-pad">
+                <div class="mb-8 cursor-pointer text-gray-400 hover:text-black text-sm w-max" onclick="router.navigate('home')">
+                    &larr; Back
+                </div>
+                
+                <div class="flex justify-between items-baseline mb-12">
+                    <h1 class="text-4xl font-light text-black" id="detail-title">--</h1>
+                    <div class="text-xl font-light font-mono" id="detail-pnl">--</div>
+                </div>
+            </div>
+
+            <div class="mb-12">
+                <div class="h-[300px] w-full relative">
+                    <canvas id="detailChart"></canvas>
+                </div>
+            </div>
+
+            <div class="content-pad">
+                <h3 class="text-xs uppercase text-gray-400 mb-4 tracking-widest">Order History</h3>
+                <table class="clean-table">
+                    <thead>
+                        <tr>
+                            <th>Type</th>
+                            <th>Side</th>
+                            <th>Size</th>
+                            <th>Price</th>
+                        </tr>
+                    </thead>
+                    <tbody id="detail-orders-body"></tbody>
+                </table>
+                <div id="detail-orders-empty" class="py-4 text-gray-400 text-sm font-mono hidden">No active orders.</div>
+            </div>
+        </div>
+
+        <div id="view-balance" class="view-section">
+            <div class="content-pad mb-8 text-sm text-gray-400">Portfolio Value</div>
+            <div class="h-[500px] w-full relative">
+                <canvas id="balanceChart"></canvas>
+            </div>
+        </div>
+
+        <div id="view-log" class="view-section">
+            <div class="content-pad">
+                <div class="mb-8 text-sm text-gray-400">System Log / Active Orders</div>
+                <table class="clean-table">
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Type</th>
+                            <th>Side</th>
+                            <th>Size</th>
+                            <th>Price</th>
+                        </tr>
+                    </thead>
+                    <tbody id="log-table-body"></tbody>
+                </table>
+                <div id="log-empty" class="py-12 text-center text-gray-400 font-mono hidden">No active orders found.</div>
+            </div>
+        </div>
+
+        <div id="view-contact" class="view-section">
+            <div class="flex flex-col items-center justify-center h-[60vh] content-pad">
+                <div class="text-sm text-gray-400 mb-2">Contact</div>
+                <div class="text-xl font-light font-mono border-b border-gray-200 pb-1" id="contact-email">
+                    Loading...
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+        const fmtUSD = (num) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(num);
+
+        // CONFIG: Stepped Lines + No Scales
+        Chart.defaults.font.family = "'JetBrains Mono', monospace";
+        Chart.defaults.font.size = 11;
+        Chart.defaults.color = '#888';
+        Chart.defaults.plugins.tooltip.backgroundColor = 'rgba(255, 255, 255, 0.95)';
+        Chart.defaults.plugins.tooltip.titleColor = '#000';
+        Chart.defaults.plugins.tooltip.bodyColor = '#444';
+        Chart.defaults.plugins.tooltip.borderColor = '#e5e5e5';
+        Chart.defaults.plugins.tooltip.borderWidth = 1;
+        Chart.defaults.plugins.tooltip.padding = 10;
+        Chart.defaults.plugins.tooltip.displayColors = false; 
+        
+        const minimalChartOptions = {
+            responsive: true,
+            maintainAspectRatio: false,
+            layout: { padding: 0 }, 
+            interaction: { intersect: false, mode: 'index' },
+            scales: {
+                x: { 
+                    type: 'time', 
+                    time: { unit: 'minute' }, 
+                    display: false, 
+                    grid: { display: false },
+                    offset: false,
+                    bounds: 'data'
+                },
+                y: { 
+                    display: false, 
+                    grid: { display: false },
+                    offset: false 
+                }
+            },
+            plugins: { legend: { display: false } },
+            elements: {
+                point: { radius: 0, hitRadius: 40, hoverRadius: 4 }, 
+                line: { borderWidth: 2 } 
+            }
+        };
+
+        const chartInstances = { home: null, balance: null, detail: null };
+
+        function toggleMenu() {
+            document.getElementById('menu-panel').classList.toggle('open');
+            document.getElementById('menu-backdrop').classList.toggle('open');
+        }
+
+        const router = {
+            navigate: (page, param = null) => {
+                document.querySelectorAll('.view-section').forEach(el => {
+                    el.classList.remove('active');
+                    setTimeout(() => { if(!el.classList.contains('active')) el.style.display = 'none'; }, 150);
+                });
+
+                const target = document.getElementById(page === 'symbol' ? 'view-symbol' : `view-${page}`);
+                target.style.display = 'block';
+                setTimeout(() => target.classList.add('active'), 10);
+
+                if (page === 'home') loadHomeData();
+                if (page === 'balance') loadBalanceData();
+                if (page === 'log') loadLogData();
+                if (page === 'contact') loadContactData();
+                if (page === 'symbol' && param) loadSymbolData(param);
+            }
+        };
+
+        async function loadHomeData() {
+            // Mock Data for preview if API fails
+            let chartData;
+            try {
+                const chartRes = await fetch('/api/symbols_chart');
+                chartData = await chartRes.json();
+            } catch (e) {
+                // Fallback mock
+                chartData = {
+                    'BTC': { invested: Array.from({length: 20}, (_, i) => ({x: Date.now()/1000 - (20-i)*3600, y: 30000 + Math.random()*1000})) },
+                    'ETH': { invested: Array.from({length: 20}, (_, i) => ({x: Date.now()/1000 - (20-i)*3600, y: 2000 + Math.random()*100})) }
+                };
+            }
+            
+            const symbolsArray = Object.keys(chartData).map(sym => {
+                const investedData = chartData[sym].invested || [];
+                const lastVal = investedData.length > 0 ? investedData[investedData.length - 1].y : 0;
+                return {
+                    sym,
+                    lastVal,
+                    invested: investedData.map(pt => ({x: pt.x * 1000, y: pt.y}))
+                };
+            });
+            symbolsArray.sort((a, b) => b.lastVal - a.lastVal);
+
+            const grid = document.getElementById('symbol-links-container');
+            if (symbolsArray.length === 0) {
+                grid.innerHTML = '<div class="col-span-full text-center text-gray-300 text-sm font-mono">No data available</div>';
+            } else {
+                grid.innerHTML = symbolsArray.map(item => `
+                    <div onclick="router.navigate('symbol', '${item.sym}')" 
+                         class="text-center py-4 border border-transparent hover:border-gray-100 rounded cursor-pointer transition text-sm text-gray-600 hover:text-black">
+                        <div class="font-medium">${item.sym}</div>
+                        <div class="text-xs text-gray-400 mt-1 font-mono">${fmtUSD(item.lastVal)}</div>
+                    </div>
+                `).join('');
+            }
+
+            const datasets = symbolsArray.map((item, idx) => {
+                return {
+                    label: item.sym,
+                    data: item.invested,
+                    borderColor: `rgba(0,0,0, ${0.8 - (idx * 0.15)})`, 
+                    borderWidth: 2,
+                    stepped: true
+                };
+            });
+
+            if (chartInstances.home) chartInstances.home.destroy();
+            chartInstances.home = new Chart(document.getElementById('homeChart'), {
+                type: 'line',
+                data: { datasets },
+                options: minimalChartOptions
+            });
+        }
+
+        async function loadBalanceData() {
+            let points;
+            try {
+                const res = await fetch('/api/balance_history');
+                const data = await res.json();
+                points = data.map(d => ({ x: d.time * 1000, y: d.equity }));
+            } catch (e) {
+                points = Array.from({length: 20}, (_, i) => ({x: Date.now() - (20-i)*3600000, y: 50000 + i*100 + Math.random()*500}));
+            }
+
+            if (chartInstances.balance) chartInstances.balance.destroy();
+            chartInstances.balance = new Chart(document.getElementById('balanceChart'), {
+                type: 'line',
+                data: {
+                    datasets: [{
+                        data: points,
+                        borderColor: '#000000',
+                        borderWidth: 2,
+                        fill: false,
+                        stepped: true
+                    }]
+                },
+                options: minimalChartOptions
+            });
+        }
+
+        async function loadLogData() {
+            let history = [];
+            try {
+                const res = await fetch('/api/status');
+                const data = await res.json();
+                history = data.history || [];
+            } catch (e) {
+                history = [];
+            }
+            
+            const tbody = document.getElementById('log-table-body');
+            
+            // NOTE: Updated to parse Flat Open Orders instead of Nested Order Events
+            if (history.length > 0) {
+                tbody.innerHTML = history.map(item => {
+                    // Try to parse 'receivedTime' (standard format) or just current time if missing
+                    let timeVal = item.receivedTime || item.time || Date.now();
+                    
+                    // Format timestamp
+                    let dateStr = "Now";
+                    try {
+                        // If it's a string, new Date handles it. If it's a timestamp, it handles it.
+                        dateStr = new Date(timeVal).toLocaleString();
+                    } catch(e) { dateStr = "--"; }
+                    
+                    const symbol = item.symbol || '--';
+                    const type = item.orderType || 'LIMIT';
+                    const side = item.side ? item.side.toLowerCase() : '--';
+                    const size = item.size || item.quantity || '--';
+                    
+                    // Prefer limitPrice, fallback to stopPrice, fallback to price
+                    const price = item.limitPrice || item.stopPrice || item.price || 'MKT';
+                    
+                    const sideClass = side === 'buy' ? 'text-green-700' : (side === 'sell' ? 'text-red-700' : 'text-gray-600');
+                    
+                    return `
+                    <tr>
+                        <td class="text-gray-500 text-xs font-mono">${dateStr}</td>
+                        <td>
+                            <b>${symbol}</b>
+                            <span class="text-xs text-gray-400 ml-1 uppercase border border-gray-100 px-1 rounded">${type}</span>
+                        </td>
+                        <td class="${sideClass} uppercase font-medium text-xs">${side}</td>
+                        <td class="text-gray-700 font-mono">${size}</td>
+                        <td class="text-gray-700 font-mono text-xs">${price !== 'MKT' ? '$' + price : price}</td>
+                    </tr>
+                `;
+                }).join('');
+                document.getElementById('log-empty').classList.add('hidden');
+            } else {
+                tbody.innerHTML = '';
+                document.getElementById('log-empty').classList.remove('hidden');
+                document.getElementById('log-empty').innerText = "No active orders found.";
+            }
+        }
+
+        async function loadSymbolData(symbol) {
+            document.getElementById('detail-title').innerText = symbol;
+            
+            let history = [];
+            let orders = [];
+            
+            try {
+                const detailRes = await fetch(`/api/symbol_detail/${symbol}`);
+                const detail = await detailRes.json();
+                history = detail.pnl_history || [];
+                orders = detail.orders || [];
+            } catch (e) {
+                history = Array.from({length: 10}, (_, i) => ({x: Date.now()/1000 - i*3600, y: Math.random() * 100 - 50}));
+            }
+            
+            const lastPnlValue = history.length > 0 ? history[history.length - 1].y : 0;
+            const pnlEl = document.getElementById('detail-pnl');
+            pnlEl.innerText = (lastPnlValue >= 0 ? '+' : '') + fmtUSD(lastPnlValue);
+            pnlEl.style.color = lastPnlValue >= 0 ? '#1a1a1a' : '#000000'; 
+
+            if (chartInstances.detail) chartInstances.detail.destroy();
+            chartInstances.detail = new Chart(document.getElementById('detailChart'), {
+                type: 'line',
+                data: {
+                    datasets: [{
+                        data: history.map(d => ({ x: d.x * 1000, y: d.y })),
+                        borderColor: '#000000',
+                        borderWidth: 2,
+                        fill: false,
+                        stepped: true
+                    }]
+                },
+                options: minimalChartOptions
+            });
+
+            const ordBody = document.getElementById('detail-orders-body');
+            ordBody.innerHTML = orders.map(o => `
+                <tr>
+                    <td class="uppercase text-xs tracking-wider">${o.orderType}</td>
+                    <td class="${o.side === 'buy' ? 'text-green-700' : 'text-red-700'}">${o.side}</td>
+                    <td class="font-mono">${o.size}</td>
+                    <td class="font-mono">$${o.limitPrice || o.stopPrice || 'MKT'}</td>
+                </tr>
+            `).join('');
+            document.getElementById('detail-orders-empty').classList.toggle('hidden', orders.length > 0);
+        }
+
+        async function loadContactData() {
+            try {
+                const res = await fetch('/api/contact');
+                const data = await res.json();
+                document.getElementById('contact-email').innerText = data.email || "Loading failed";
+            } catch (e) {
+                document.getElementById('contact-email').innerText = "contact@primate.obs";
+            }
+        }
+
+        router.navigate('home');
+    </script>
+</body>
+</html>
