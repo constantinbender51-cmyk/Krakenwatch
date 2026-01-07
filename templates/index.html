@@ -449,7 +449,7 @@
                     <tr>
                         <td class="uppercase text-xs tracking-wider">${o.orderType}</td>
                         <td class="${o.side === 'buy' ? 'text-green-700' : 'text-red-700'}">${o.side}</td>
-                        <td class="font-mono">${o.size || o.quantity}</td>
+                        <td class="font-mono">${o.unfilledSize}</td>
                         <td class="font-mono">$${o.limitPrice || o.stopPrice || 'MKT'}</td>
                     </tr>
                 `).join('');
