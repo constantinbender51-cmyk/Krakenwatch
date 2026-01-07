@@ -228,29 +228,31 @@
             layout: { padding: 0 }, 
             interaction: { intersect: false, mode: 'index' },
             scales: {
-                x: { 
-                    type: 'time', 
-                    time: { unit: 'minute' }, 
-                    display: false, 
+                x: {
+                    type: 'time',
+                    time: { unit: 'minute' },
+                    display: false,
                     grid: { display: false },
                     offset: false,
                     bounds: 'data'
                 },
-                y: { 
-                    display: false, 
+                y: {
+                    display: false,
                     grid: { display: false },
-                    offset: false 
+                    offset: false
                 }
             },
             plugins: { legend: { display: false } },
             elements: {
                 point: { radius: 0, hitRadius: 40, hoverRadius: 4 }, 
-                line: { borderWidth: 2 } 
+                line: { borderWidth: 2 }
             }
         };
 
-        // NEW PLUGIN: Draws 10 horizontal lines on top of everything
-        const overlayGridPlugin = {
+        // Removed the overlayGridPlugin as it was adding unwanted horizontal lines.
+        // No new plugin is needed for basic chart functionality.
+
+        const chartInstances = {
             id: 'overlayGrid',
             afterDatasetsDraw: (chart) => {
                 const { ctx, chartArea: { top, bottom, left, right, height } } = chart;
@@ -465,7 +467,7 @@
                     }]
                 },
                 options: minimalChartOptions,
-                plugins: [overlayGridPlugin] // Register custom plugin here
+                plugins: [] // No custom plugins needed
             });
 
             const ordBody = document.getElementById('detail-orders-body');
