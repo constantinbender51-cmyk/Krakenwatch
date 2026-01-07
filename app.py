@@ -176,7 +176,7 @@ def save_found_orders(orders_list):
             
             symbol = o.get('tradeable') # Use 'tradeable' for symbol in history API
             side = o.get('direction', 'buy') # Use 'direction' for side in history API
-            size = float(o.get('quantity', 0)) # Use 'quantity' for size in history API
+            size = float(o.get('unfilledSize', 0)) # Use 'unfilledSize' for size, as specified
             # Price for history items can be 'limitPrice', 'stopPrice', 'price', or 'fillPrice'
             # Prioritize limitPrice, then fillPrice, default to 0 if not found.
             price = float(o.get('limitPrice', 0) or o.get('fillPrice', 0))
