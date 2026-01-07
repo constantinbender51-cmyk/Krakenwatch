@@ -113,7 +113,7 @@
         <div class="flex flex-col space-y-6 mt-12">
             <a onclick="router.navigate('home'); toggleMenu()" class="clinical-link">Home</a>
             <a onclick="router.navigate('balance'); toggleMenu()" class="clinical-link">Balance</a>
-            <a onclick="router.navigate('log'); toggleMenu()" class="clinical-link">Log</a>
+            <a onclick="router.navigate('log'); toggleMenu()" class="clinical-link">Log / Orders</a>
             <a onclick="router.navigate('contact'); toggleMenu()" class="clinical-link">Contact</a>
         </div>
     </div>
@@ -176,12 +176,12 @@
 
         <div id="view-log" class="view-section">
             <div class="content-pad">
-                <div class="mb-8 text-sm text-gray-400">System Log</div>
+                <div class="mb-8 text-sm text-gray-400">System Log / Active Orders</div>
                 <table class="clean-table">
                     <thead>
                         <tr>
                             <th>Time</th>
-                            <th>Event</th>
+                            <th>Type</th>
                             <th>Side</th>
                             <th>Size</th>
                             <th>Price</th>
@@ -189,7 +189,7 @@
                     </thead>
                     <tbody id="log-table-body"></tbody>
                 </table>
-                <div id="log-empty" class="py-12 text-center text-gray-400 font-mono hidden">No events found.</div>
+                <div id="log-empty" class="py-12 text-center text-gray-400 font-mono hidden">No active orders found.</div>
             </div>
         </div>
 
@@ -295,8 +295,6 @@
                     invested: investedData.map(pt => ({x: pt.x * 1000, y: pt.y}))
                 };
             });
-            // Sort by value (Descending) so larger areas are drawn first (in the back)
-            // ensuring the white fill works as a proper mask for the background
             symbolsArray.sort((a, b) => b.lastVal - a.lastVal);
 
             const grid = document.getElementById('symbol-links-container');
@@ -318,12 +316,7 @@
                     data: item.invested,
                     borderColor: `rgba(0,0,0, ${0.8 - (idx * 0.15)})`, 
                     borderWidth: 2,
-                    stepped: true,
-                    
-                    // Mask the background image below the line using solid white
-                    // Since we sorted largest to smallest, this stacks correctly
-                    fill: 'start',      
-                    backgroundColor: '#ffffff' 
+                    stepped: true
                 };
             });
 
@@ -353,8 +346,7 @@
                         data: points,
                         borderColor: '#000000',
                         borderWidth: 2,
-                        fill: 'start',      
-                        backgroundColor: '#ffffff', 
+                        fill: false,
                         stepped: true
                     }]
                 },
@@ -374,21 +366,32 @@
             
             const tbody = document.getElementById('log-table-body');
             
+            // NOTE: Updated to parse Flat Open Orders instead of Nested Order Events
             if (history.length > 0) {
                 tbody.innerHTML = history.map(item => {
-                    const evt = item.event || {};
-                    const order = item.order || {};
-                    const time = evt.timestamp || item.timestamp || Date.now();
-                    const type = evt.type || 'EVENT';
-                    const side = order.direction ? order.direction.toLowerCase() : (order.side || '--');
-                    const symbol = order.symbol || '--';
-                    const size = order.quantity || order.size || '--';
-                    const price = order.limitPrice || order.price || 'MKT';
+                    // Try to parse 'receivedTime' (standard format) or just current time if missing
+                    let timeVal = item.receivedTime || item.time || Date.now();
+                    
+                    // Format timestamp
+                    let dateStr = "Now";
+                    try {
+                        // If it's a string, new Date handles it. If it's a timestamp, it handles it.
+                        dateStr = new Date(timeVal).toLocaleString();
+                    } catch(e) { dateStr = "--"; }
+                    
+                    const symbol = item.symbol || '--';
+                    const type = item.orderType || 'LIMIT';
+                    const side = item.side ? item.side.toLowerCase() : '--';
+                    const size = item.size || item.quantity || '--';
+                    
+                    // Prefer limitPrice, fallback to stopPrice, fallback to price
+                    const price = item.limitPrice || item.stopPrice || item.price || 'MKT';
+                    
                     const sideClass = side === 'buy' ? 'text-green-700' : (side === 'sell' ? 'text-red-700' : 'text-gray-600');
                     
                     return `
                     <tr>
-                        <td class="text-gray-500 text-xs font-mono">${new Date(time).toLocaleString()}</td>
+                        <td class="text-gray-500 text-xs font-mono">${dateStr}</td>
                         <td>
                             <b>${symbol}</b>
                             <span class="text-xs text-gray-400 ml-1 uppercase border border-gray-100 px-1 rounded">${type}</span>
@@ -403,7 +406,7 @@
             } else {
                 tbody.innerHTML = '';
                 document.getElementById('log-empty').classList.remove('hidden');
-                document.getElementById('log-empty').innerText = "No history found.";
+                document.getElementById('log-empty').innerText = "No active orders found.";
             }
         }
 
@@ -435,8 +438,7 @@
                         data: history.map(d => ({ x: d.x * 1000, y: d.y })),
                         borderColor: '#000000',
                         borderWidth: 2,
-                        fill: 'start',
-                        backgroundColor: '#ffffff', 
+                        fill: false,
                         stepped: true
                     }]
                 },
@@ -469,5 +471,4 @@
     </script>
 </body>
 </html>
-
 
