@@ -10,6 +10,7 @@ UPDATES:
 - Integrated external 'kraken_futures.py' library.
 - Log Page now shows a cumulative history of all open orders ever found.
 - Language reverted to English.
+- Corrected Order Size calculation (Unfilled + Filled).
 """
 
 import os
@@ -176,7 +177,12 @@ def save_found_orders(orders_list):
             
             symbol = o.get('tradeable') # Use 'tradeable' for symbol in history API
             side = o.get('direction', 'buy') # Use 'direction' for side in history API
-            size = float(o.get('unfilledSize', 0)) # Use 'unfilledSize' for size, as specified
+            
+            # --- CORRECTED SIZE CALCULATION ---
+            unfilled = float(o.get('unfilledSize', 0))
+            filled = float(o.get('filledSize', 0))
+            size = unfilled + filled
+            
             # Price for history items can be 'limitPrice', 'stopPrice', 'price', or 'fillPrice'
             # Prioritize limitPrice, then fillPrice, default to 0 if not found.
             price = float(o.get('limitPrice', 0) or o.get('fillPrice', 0))
