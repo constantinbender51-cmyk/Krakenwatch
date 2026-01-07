@@ -474,14 +474,21 @@
             // as this makes the most sense for a symbol detail view.
             // The complete history is in the Log.
             if (orders.length > 0) {
-                ordBody.innerHTML = orders.map(o => `
+                ordBody.innerHTML = orders.map(o => {
+                    // Safe calculation for string or number inputs
+                    const filled = parseFloat(o.filledSize) || 0;
+                    const unfilled = parseFloat(o.unfilledSize) || 0;
+                    const totalSize = filled + unfilled;
+                    
+                    return `
                     <tr>
                         <td class="uppercase text-xs tracking-wider">${o.orderType}</td>
                         <td class="${o.side === 'buy' ? 'text-green-700' : 'text-red-700'}">${o.side}</td>
-                        <td class="font-mono">${(o.filledSize || 0) + (o.unfilledSize || 0)}</td>
+                        <td class="font-mono">${totalSize}</td>
                         <td class="font-mono">$${o.limitPrice || o.stopPrice || 'MKT'}</td>
                     </tr>
-                `).join('');
+                `;
+                }).join('');
                 document.getElementById('detail-orders-empty').classList.add('hidden');
             } else {
                 ordBody.innerHTML = '';
@@ -503,5 +510,3 @@
     </script>
 </body>
 </html>
-
-
