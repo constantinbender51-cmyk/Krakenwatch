@@ -249,6 +249,32 @@
             }
         };
 
+        // NEW PLUGIN: Draws 10 horizontal lines on top of everything
+        const overlayGridPlugin = {
+            id: 'overlayGrid',
+            afterDatasetsDraw: (chart) => {
+                const { ctx, chartArea: { top, bottom, left, right, height } } = chart;
+                ctx.save();
+                ctx.beginPath();
+                ctx.strokeStyle = '#e5e5e5'; // Minimalist gray
+                ctx.lineWidth = 1;
+
+                // Divide space into 10 sections
+                const count = 10;
+                const step = height / count;
+                
+                // Draw 10 lines (skipping the very top, drawing down to the bottom)
+                for (let i = 1; i <= count; i++) {
+                    const y = top + (step * i);
+                    ctx.moveTo(left, y);
+                    ctx.lineTo(right, y);
+                }
+                
+                ctx.stroke();
+                ctx.restore();
+            }
+        };
+
         const chartInstances = { home: null, balance: null, detail: null };
 
         function toggleMenu() {
@@ -328,7 +354,8 @@
             chartInstances.home = new Chart(document.getElementById('homeChart'), {
                 type: 'line',
                 data: { datasets },
-                options: minimalChartOptions
+                options: minimalChartOptions,
+                plugins: [overlayGridPlugin] // Register custom plugin here
             });
         }
 
@@ -355,7 +382,8 @@
                         stepped: true
                     }]
                 },
-                options: minimalChartOptions
+                options: minimalChartOptions,
+                plugins: [overlayGridPlugin] // Register custom plugin here
             });
         }
 
@@ -437,7 +465,8 @@
                         stepped: true
                     }]
                 },
-                options: minimalChartOptions
+                options: minimalChartOptions,
+                plugins: [overlayGridPlugin] // Register custom plugin here
             });
 
             const ordBody = document.getElementById('detail-orders-body');
@@ -474,3 +503,4 @@
     </script>
 </body>
 </html>
+
