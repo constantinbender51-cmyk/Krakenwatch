@@ -355,7 +355,7 @@
                 type: 'line',
                 data: { datasets },
                 options: minimalChartOptions,
-                plugins: [overlayGridPlugin] // Register custom plugin here
+                // No custom plugins needed here anymore
             });
         }
 
@@ -382,8 +382,7 @@
                         stepped: true
                     }]
                 },
-                options: minimalChartOptions,
-                plugins: [overlayGridPlugin] // Register custom plugin here
+                options: minimalChartOptions
             });
         }
 
