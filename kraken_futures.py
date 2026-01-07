@@ -137,6 +137,15 @@ class KrakenFuturesApi:
         """Return single order status."""
         return self._request("GET", "/derivatives/api/v3/orders", {"order_id": order_id})
 
+    def get_order_events(self, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Fetches order history/events from /api/history/v3/orders.
+        This includes open, filled, cancelled, and rejected orders.
+        """
+        response = self._request("GET", "/api/history/v3/orders", params)
+        # The API typically returns an object with an 'elements' array for history
+        return response.get('elements', response)
+
 # ------------------------------------------------------------------
 # quick self-test
 # ------------------------------------------------------------------
