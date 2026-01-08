@@ -95,17 +95,14 @@
 </head>
 <body class="antialiased min-h-screen">
 
-    <!-- Header / Logo Click Area -->
     <div class="fixed top-8 left-1/2 transform -translate-x-1/2 z-50 cursor-pointer select-none" onclick="router.navigate('home')">
         <h1 class="brand-text">Primate</h1>
     </div>
 
-    <!-- Burger Menu Icon -->
     <div class="fixed top-8 right-6 z-50 cursor-pointer p-2 hover:bg-gray-50 rounded-full" onclick="toggleMenu()">
         <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-gray-400 hover:text-black transition"><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle><circle cx="5" cy="12" r="1"></circle></svg>
     </div>
 
-    <!-- Menu Panel -->
     <div class="menu-backdrop" id="menu-backdrop" onclick="toggleMenu()"></div>
     <div class="menu-overlay" id="menu-panel">
         <div class="flex flex-col space-y-6 mt-12">
@@ -118,7 +115,6 @@
 
     <div class="page-container">
 
-        <!-- HOME VIEW -->
         <div id="view-home" class="view-section active">
             <div class="mb-12">
                 <div class="h-[400px] w-full relative">
@@ -131,7 +127,6 @@
             </div>
         </div>
 
-        <!-- SYMBOL DETAIL VIEW -->
         <div id="view-symbol" class="view-section">
             <div class="content-pad">
                 <div class="mb-8 cursor-pointer text-gray-400 hover:text-black text-sm w-max" onclick="router.navigate('home')">
@@ -167,7 +162,6 @@
             </div>
         </div>
 
-        <!-- BALANCE VIEW -->
         <div id="view-balance" class="view-section">
             <div class="content-pad mb-8 text-sm text-gray-400">Portfolio Value</div>
             <div class="h-[500px] w-full relative">
@@ -175,7 +169,6 @@
             </div>
         </div>
 
-        <!-- LOG VIEW (History) -->
         <div id="view-log" class="view-section">
             <div class="content-pad">
                 <div class="mb-8 text-sm text-gray-400">System Log (Order History)</div>
@@ -195,7 +188,6 @@
             </div>
         </div>
 
-        <!-- CONTACT VIEW -->
         <div id="view-contact" class="view-section">
             <div class="flex flex-col items-center justify-center h-[60vh] content-pad">
                 <div class="text-sm text-gray-400 mb-2">Contact</div>
@@ -290,7 +282,6 @@
             
             const symbolsArray = Object.keys(chartData).map(sym => {
                 const investedData = chartData[sym].invested || [];
-                // Calculate Max Value to sort by "Highest Peak"
                 let maxVal = 0;
                 let lastVal = 0;
                 if (investedData.length > 0) {
@@ -302,48 +293,11 @@
                     sym,
                     lastVal,
                     maxVal,
-                    // Ensure x is in milliseconds for Chart.js
                     invested: investedData.map(pt => ({x: pt.x * 1000, y: pt.y}))
                 };
             });
             
-            // 1. Calculate the Envelope (Silhouette)
-            // Group values by timestamp to find the MAX value at every time point
-            const timeMap = new Map();
-            symbolsArray.forEach(item => {
-                item.invested.forEach(pt => {
-                    // Normalize timestamp to integer. pt.x is already in milliseconds here.
-                    const t = Math.floor(pt.x); 
-                    if (!timeMap.has(t)) timeMap.set(t, []);
-                    timeMap.get(t).push(pt.y);
-                });
-            });
-            
-            // Sort unique timestamps
-            const sortedTimes = Array.from(timeMap.keys()).sort((a, b) => a - b);
-            
-            // Create Max Points
-            const envelopeData = sortedTimes.map(t => {
-                const values = timeMap.get(t);
-                const maxVal = Math.max(0, ...values); 
-                return { x: t, y: maxVal };
-            });
-
-            // The Silhouette Dataset (White Mountain)
-            // Drawn first, fills to bottom with white, blocking the background image
-            const envelopeDataset = {
-                label: 'Silhouette',
-                data: envelopeData,
-                borderColor: 'transparent',
-                pointRadius: 0,
-                borderWidth: 0,
-                stepped: true,
-                fill: 'start',      
-                backgroundColor: '#ffffff' // This white fill blocks the body background image
-            };
-            
-            // 2. Sort Regular Datasets
-            // Sort by MAX value (Descending) so larger overall trends are behind smaller ones
+            // Sort by MAX value (Descending) so largest is at bottom of stack
             symbolsArray.sort((a, b) => b.maxVal - a.maxVal);
 
             const grid = document.getElementById('symbol-links-container');
@@ -358,26 +312,29 @@
                 `).join('');
             }
 
-            const lineDatasets = symbolsArray.map((item, idx) => {
+            const datasets = symbolsArray.map((item, idx) => {
                 return {
                     label: item.sym,
                     data: item.invested,
                     borderColor: '#000000', 
                     borderWidth: 2,
                     stepped: true,
-                    fill: false,        // DISABLED FILL to prevent overlay issues
-                    backgroundColor: 'transparent' 
+                    // STACKED CHART CONFIGURATION
+                    fill: 'origin',           // Fill to bottom (or previous stack)
+                    backgroundColor: '#ffffff' // White fill blocks the background
                 };
             });
-            
-            // Combine: Silhouette first, then lines
-            const datasets = [envelopeDataset, ...lineDatasets];
 
             if (chartInstances.home) chartInstances.home.destroy();
+            
+            // Create Stacked Chart to achieve the "Mountain" effect + "Cutout"
+            const homeOptions = JSON.parse(JSON.stringify(minimalChartOptions));
+            homeOptions.scales.y.stacked = true; // Enable stacking
+
             chartInstances.home = new Chart(document.getElementById('homeChart'), {
                 type: 'line',
                 data: { datasets },
-                options: minimalChartOptions
+                options: homeOptions
             });
         }
 
@@ -400,7 +357,7 @@
                         borderColor: '#000000',
                         borderWidth: 2,
                         fill: 'start',      
-                        backgroundColor: '#ffffff', // Keep fill for single line charts (Balance)
+                        backgroundColor: '#ffffff', 
                         stepped: true
                     }]
                 },
@@ -422,14 +379,12 @@
             
             if (history.length > 0) {
                 tbody.innerHTML = history.map(item => {
-                    // Backend now returns flat objects from the 'order_log' table
                     const time = item.timestamp * 1000;
                     const type = item.type || 'LIMIT';
                     const side = item.side ? item.side.toLowerCase() : '--';
                     const symbol = item.symbol || '--';
                     const size = item.size || '--';
                     const price = item.price || 'MKT';
-                    
                     const sideClass = side === 'buy' ? 'text-green-700' : (side === 'sell' ? 'text-red-700' : 'text-gray-600');
                     
                     return `
@@ -482,7 +437,7 @@
                         borderColor: '#000000',
                         borderWidth: 2,
                         fill: 'start',
-                        backgroundColor: '#ffffff', // Keep fill for single line charts (Symbol)
+                        backgroundColor: '#ffffff', 
                         stepped: true
                     }]
                 },
@@ -490,12 +445,8 @@
             });
 
             const ordBody = document.getElementById('detail-orders-body');
-            // Here we continue to show only ACTIVE (Open) Orders, 
-            // as this makes the most sense for a symbol detail view.
-            // The complete history is in the Log.
             if (orders.length > 0) {
                 ordBody.innerHTML = orders.map(o => {
-                    // Safe calculation for string or number inputs
                     const filled = parseFloat(o.filledSize) || 0;
                     const unfilled = parseFloat(o.unfilledSize) || 0;
                     const totalSize = filled + unfilled;
@@ -530,5 +481,3 @@
     </script>
 </body>
 </html>
-
-
