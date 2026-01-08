@@ -210,7 +210,7 @@
     <script>
         const fmtUSD = (num) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(num);
 
-        // CONFIG: Stepped Lines + No Scales
+        // CONFIG: Smoother curves + better interaction
         Chart.defaults.font.family = "'JetBrains Mono', monospace";
         Chart.defaults.font.size = 11;
         Chart.defaults.color = '#888';
@@ -222,19 +222,21 @@
         Chart.defaults.plugins.tooltip.padding = 10;
         Chart.defaults.plugins.tooltip.displayColors = true; 
         
-        // --- INTERACTION FIX ---
-        // Ensure that hover/interaction works for ALL datasets at the same Index
-        // intersect: false ensures you don't have to be exactly on the line
         const minimalChartOptions = {
             responsive: true,
             maintainAspectRatio: false,
             layout: { padding: 0 }, 
+            // INTERACTION FIX: 
+            // 'nearest' with axis: 'x' and intersect: false means you just 
+            // have to hover the time column, not the specific pixel on the line.
             interaction: { 
-                mode: 'index', 
+                mode: 'nearest', 
+                axis: 'x', 
                 intersect: false 
             },
             hover: {
-                mode: 'index',
+                mode: 'nearest',
+                axis: 'x',
                 intersect: false
             },
             scales: {
@@ -252,14 +254,36 @@
                     offset: false 
                 }
             },
-            plugins: { legend: { display: false } },
+            plugins: { 
+                legend: { display: false },
+                // HIDE MASK from tooltip
+                tooltip: {
+                    filter: function(tooltipItem) {
+                        return tooltipItem.dataset.label !== 'Silhouette';
+                    }
+                }
+            },
             elements: {
-                point: { radius: 0, hitRadius: 40, hoverRadius: 4 }, 
-                line: { borderWidth: 2 } 
+                point: { radius: 0, hitRadius: 20, hoverRadius: 6 }, 
+                line: { borderWidth: 2, tension: 0.3 } // SMOOTH CURVES (tension > 0)
             }
         };
 
         const chartInstances = { home: null, balance: null, detail: null };
+        
+        // Palette for the chart lines
+        const colorPalette = [
+            '#2563eb', // Blue
+            '#dc2626', // Red
+            '#16a34a', // Green
+            '#9333ea', // Purple
+            '#d97706', // Amber
+            '#0891b2', // Cyan
+            '#db2777', // Pink
+            '#4f46e5', // Indigo
+            '#ca8a04', // Yellow-Gold
+            '#000000'  // Black
+        ];
 
         function toggleMenu() {
             document.getElementById('menu-panel').classList.toggle('open');
@@ -304,7 +328,6 @@
                 let maxVal = 0;
                 let lastVal = 0;
                 
-                // If investedData has nulls, we filter them for math, but keep them for chart
                 const validPoints = investedData.filter(d => d.y !== null);
                 if (validPoints.length > 0) {
                     lastVal = validPoints[validPoints.length - 1].y;
@@ -319,23 +342,40 @@
                 };
             });
             
-            // Sort by MAX value (Descending)
+            // 1. Calculate the Envelope (Silhouette) for the Mountain Mask
+            // Group values by timestamp to find the MAX value at every time point
+            const timeMap = new Map();
+            symbolsArray.forEach(item => {
+                item.invested.forEach(pt => {
+                    const t = Math.floor(pt.x); 
+                    if (!timeMap.has(t)) timeMap.set(t, []);
+                    if (pt.y !== null) timeMap.get(t).push(pt.y);
+                });
+            });
+            
+            const sortedTimes = Array.from(timeMap.keys()).sort((a, b) => a - b);
+            const envelopeData = sortedTimes.map(t => {
+                const values = timeMap.get(t);
+                const maxVal = values.length > 0 ? Math.max(0, ...values) : 0; 
+                return { x: t, y: maxVal };
+            });
+
+            // This dataset creates the white "body" of the mountain, hiding the background image below the curve.
+            const envelopeDataset = {
+                label: 'Silhouette',
+                data: envelopeData,
+                borderColor: 'transparent',
+                pointRadius: 0,
+                borderWidth: 0,
+                tension: 0.3,
+                fill: 'start',      
+                backgroundColor: '#ffffff'
+            };
+
+            // 2. Sort Regular Datasets
             symbolsArray.sort((a, b) => b.maxVal - a.maxVal);
 
-            // High Contrast Professional Palette
-            const colorPalette = [
-                '#2563eb', // Blue
-                '#dc2626', // Red
-                '#16a34a', // Green
-                '#9333ea', // Purple
-                '#d97706', // Amber
-                '#0891b2', // Cyan
-                '#db2777', // Pink
-                '#4f46e5', // Indigo
-                '#ca8a04', // Yellow-Gold
-                '#000000'  // Black
-            ];
-
+            // Populate Legend
             const grid = document.getElementById('symbol-links-container');
             if (symbolsArray.length === 0) {
                 grid.innerHTML = '<div class="col-span-full text-center text-gray-300 text-sm font-mono">No data available</div>';
@@ -351,24 +391,50 @@
                 `}).join('');
             }
 
-            const datasets = symbolsArray.map((item, idx) => {
+            // Create Chart Datasets
+            const assetDatasets = symbolsArray.map((item, idx) => {
                 return {
                     label: item.sym,
                     data: item.invested,
                     borderColor: colorPalette[idx % colorPalette.length], 
                     borderWidth: 2,
-                    stepped: true,
-                    fill: false,  // Ensure no fill blocks interaction
+                    tension: 0.3,  // Smooth lines
+                    fill: false,   // No fill for individual lines
                     backgroundColor: 'transparent',
-                    pointHoverRadius: 6 // slightly larger hover area
+                    pointHoverRadius: 6
                 };
             });
+            
+            // Combine: Silhouette first (behind), then lines
+            const datasets = [envelopeDataset, ...assetDatasets];
 
             if (chartInstances.home) chartInstances.home.destroy();
+            
+            // Home Chart Specific Options: Add OnClick Navigation
+            const homeOptions = JSON.parse(JSON.stringify(minimalChartOptions));
+            homeOptions.onClick = (evt, elements, chart) => {
+                if (!elements || elements.length === 0) return;
+                // elements[0] is the nearest point.
+                const firstPoint = elements[0];
+                const datasetIndex = firstPoint.datasetIndex;
+                
+                // Ignore the Silhouette dataset (index 0) if it accidentally captures click
+                if (datasetIndex === 0) return;
+                
+                // Map dataset index back to symbol. 
+                // Note: datasets array has envelope at 0, so asset datasets are at index 1...N
+                // symbolArray index is (datasetIndex - 1)
+                const symbolIdx = datasetIndex - 1;
+                if (symbolIdx >= 0 && symbolIdx < symbolsArray.length) {
+                    const sym = symbolsArray[symbolIdx].sym;
+                    router.navigate('symbol', sym);
+                }
+            };
+
             chartInstances.home = new Chart(document.getElementById('homeChart'), {
                 type: 'line',
                 data: { datasets },
-                options: minimalChartOptions
+                options: homeOptions
             });
         }
 
@@ -390,9 +456,9 @@
                         data: points,
                         borderColor: '#000000',
                         borderWidth: 2,
+                        tension: 0.3, // Consistent styling
                         fill: 'start',      
-                        backgroundColor: '#ffffff', 
-                        stepped: true
+                        backgroundColor: '#ffffff'
                     }]
                 },
                 options: minimalChartOptions
@@ -478,7 +544,7 @@
                         borderWidth: 2,
                         fill: 'start',
                         backgroundColor: '#ffffff', 
-                        stepped: true,
+                        tension: 0.3,
                         spanGaps: false // IMPORTANT: Do NOT connect lines over nulls
                     }]
                 },
