@@ -95,17 +95,14 @@
 </head>
 <body class="antialiased min-h-screen">
 
-    <!-- Header / Logo Click Area -->
     <div class="fixed top-8 left-1/2 transform -translate-x-1/2 z-50 cursor-pointer select-none" onclick="router.navigate('home')">
         <h1 class="brand-text">Primate</h1>
     </div>
 
-    <!-- Burger Menu Icon -->
     <div class="fixed top-8 right-6 z-50 cursor-pointer p-2 hover:bg-gray-50 rounded-full" onclick="toggleMenu()">
         <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-gray-400 hover:text-black transition"><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle><circle cx="5" cy="12" r="1"></circle></svg>
     </div>
 
-    <!-- Menu Panel -->
     <div class="menu-backdrop" id="menu-backdrop" onclick="toggleMenu()"></div>
     <div class="menu-overlay" id="menu-panel">
         <div class="flex flex-col space-y-6 mt-12">
@@ -118,20 +115,12 @@
 
     <div class="page-container">
 
-        <!-- HOME VIEW -->
         <div id="view-home" class="view-section active">
-            <div class="mb-12">
-                <div class="h-[400px] w-full relative">
-                    <canvas id="homeChart"></canvas>
-                </div>
-            </div>
-
-            <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-6 content-pad" id="symbol-links-container">
-                <div class="text-center text-gray-300 text-sm col-span-full font-mono">Loading assets...</div>
+            <div id="home-charts-grid" class="grid grid-cols-1 md:grid-cols-2 gap-12 content-pad mb-12">
+                <div class="text-center text-gray-300 text-sm font-mono col-span-full mt-12">Initializing...</div>
             </div>
         </div>
 
-        <!-- SYMBOL DETAIL VIEW -->
         <div id="view-symbol" class="view-section">
             <div class="content-pad">
                 <div class="mb-8 cursor-pointer text-gray-400 hover:text-black text-sm w-max" onclick="router.navigate('home')">
@@ -167,7 +156,6 @@
             </div>
         </div>
 
-        <!-- BALANCE VIEW -->
         <div id="view-balance" class="view-section">
             <div class="content-pad mb-8 text-sm text-gray-400">Portfolio Value</div>
             <div class="h-[500px] w-full relative">
@@ -175,7 +163,6 @@
             </div>
         </div>
 
-        <!-- LOG VIEW (History) -->
         <div id="view-log" class="view-section">
             <div class="content-pad">
                 <div class="mb-8 text-sm text-gray-400">System Log (Order History)</div>
@@ -195,7 +182,6 @@
             </div>
         </div>
 
-        <!-- CONTACT VIEW -->
         <div id="view-contact" class="view-section">
             <div class="flex flex-col items-center justify-center h-[60vh] content-pad">
                 <div class="text-sm text-gray-400 mb-2">Contact</div>
@@ -226,9 +212,6 @@
             responsive: true,
             maintainAspectRatio: false,
             layout: { padding: 0 }, 
-            // INTERACTION FIX: 
-            // 'nearest' with axis: 'x' and intersect: false means you just 
-            // have to hover the time column, not the specific pixel on the line.
             interaction: { 
                 mode: 'nearest', 
                 axis: 'x', 
@@ -255,21 +238,17 @@
                 }
             },
             plugins: { 
-                legend: { display: false },
-                // HIDE MASK from tooltip
-                tooltip: {
-                    filter: function(tooltipItem) {
-                        return tooltipItem.dataset.label !== 'Silhouette';
-                    }
-                }
+                legend: { display: false }
             },
             elements: {
                 point: { radius: 0, hitRadius: 20, hoverRadius: 6 }, 
-                line: { borderWidth: 2, tension: 0.3 } // SMOOTH CURVES (tension > 0)
+                line: { borderWidth: 2, tension: 0.3 } 
             }
         };
 
-        const chartInstances = { home: null, balance: null, detail: null };
+        // GLOBAL: Keep track of multiple home charts to destroy them on reload
+        let homeChartInstances = [];
+        const chartInstances = { balance: null, detail: null };
         
         // Palette for the chart lines
         const colorPalette = [
@@ -310,131 +289,89 @@
         };
 
         async function loadHomeData() {
-            // Fallback mock data
+            // Clean up old charts
+            homeChartInstances.forEach(c => c.destroy());
+            homeChartInstances = [];
+
+            const grid = document.getElementById('home-charts-grid');
+            grid.innerHTML = '<div class="col-span-full text-center text-gray-300 text-sm font-mono mt-8">Loading data...</div>';
+
             let chartData;
             try {
                 const chartRes = await fetch('/api/symbols_chart');
                 chartData = await chartRes.json();
             } catch (e) {
+                // Mock Data for Fallback
                 chartData = {
                     'BTC': { invested: Array.from({length: 20}, (_, i) => ({x: Date.now()/1000 - (20-i)*3600, y: 30000 + Math.random()*1000})) },
                     'ETH': { invested: Array.from({length: 20}, (_, i) => ({x: Date.now()/1000 - (20-i)*3600, y: 2000 + Math.random()*100})) }
                 };
             }
             
-            const symbolsArray = Object.keys(chartData).map(sym => {
-                const investedData = chartData[sym].invested || [];
-                // Calculate Max Value to sort by "Highest Peak"
-                let maxVal = 0;
-                let lastVal = 0;
-                
-                const validPoints = investedData.filter(d => d.y !== null);
-                if (validPoints.length > 0) {
-                    lastVal = validPoints[validPoints.length - 1].y;
-                    maxVal = Math.max(...validPoints.map(d => d.y));
-                }
+            // Empty grid before population
+            grid.innerHTML = '';
 
-                return {
-                    sym,
-                    lastVal,
-                    maxVal,
-                    invested: investedData.map(pt => ({x: pt.x * 1000, y: pt.y}))
-                };
-            });
-            
-            // 1. Calculate the Envelope (Silhouette) for the Mountain Mask
-            // Group values by timestamp to find the MAX value at every time point
-            const timeMap = new Map();
-            symbolsArray.forEach(item => {
-                item.invested.forEach(pt => {
-                    const t = Math.floor(pt.x); 
-                    if (!timeMap.has(t)) timeMap.set(t, []);
-                    if (pt.y !== null) timeMap.get(t).push(pt.y);
-                });
-            });
-            
-            const sortedTimes = Array.from(timeMap.keys()).sort((a, b) => a - b);
-            const envelopeData = sortedTimes.map(t => {
-                const values = timeMap.get(t);
-                const maxVal = values.length > 0 ? Math.max(0, ...values) : 0; 
-                return { x: t, y: maxVal };
-            });
-
-            // This dataset creates the white "body" of the mountain, hiding the background image below the curve.
-            const envelopeDataset = {
-                label: 'Silhouette',
-                data: envelopeData,
-                borderColor: 'transparent',
-                pointRadius: 0,
-                borderWidth: 0,
-                tension: 0.3,
-                fill: 'start',      
-                backgroundColor: '#ffffff'
-            };
-
-            // 2. Sort Regular Datasets
-            symbolsArray.sort((a, b) => b.maxVal - a.maxVal);
-
-            // Populate Legend
-            const grid = document.getElementById('symbol-links-container');
-            if (symbolsArray.length === 0) {
-                grid.innerHTML = '<div class="col-span-full text-center text-gray-300 text-sm font-mono">No data available</div>';
-            } else {
-                grid.innerHTML = symbolsArray.map((item, idx) => {
-                    const color = colorPalette[idx % colorPalette.length];
-                    return `
-                    <div onclick="router.navigate('symbol', '${item.sym}')" 
-                         class="text-center py-4 border border-transparent hover:border-gray-100 rounded cursor-pointer transition text-sm hover:text-black font-medium"
-                         style="color: ${color}">
-                        <div>${item.sym}</div>
-                    </div>
-                `}).join('');
+            const symbols = Object.keys(chartData);
+            if (symbols.length === 0) {
+                grid.innerHTML = '<div class="col-span-full text-center text-gray-300 text-sm font-mono mt-8">No assets found.</div>';
+                return;
             }
 
-            // Create Chart Datasets
-            const assetDatasets = symbolsArray.map((item, idx) => {
-                return {
-                    label: item.sym,
-                    data: item.invested,
-                    borderColor: colorPalette[idx % colorPalette.length], 
-                    borderWidth: 2,
-                    tension: 0.3,  // Smooth lines
-                    fill: false,   // No fill for individual lines
-                    backgroundColor: 'transparent',
-                    pointHoverRadius: 6
-                };
-            });
-            
-            // Combine: Silhouette first (behind), then lines
-            const datasets = [envelopeDataset, ...assetDatasets];
-
-            if (chartInstances.home) chartInstances.home.destroy();
-            
-            // Home Chart Specific Options: Add OnClick Navigation
-            const homeOptions = JSON.parse(JSON.stringify(minimalChartOptions));
-            homeOptions.onClick = (evt, elements, chart) => {
-                if (!elements || elements.length === 0) return;
-                // elements[0] is the nearest point.
-                const firstPoint = elements[0];
-                const datasetIndex = firstPoint.datasetIndex;
+            symbols.forEach((sym, idx) => {
+                const investedData = chartData[sym].invested || [];
+                // Sort data just in case
+                investedData.sort((a, b) => a.x - b.x);
                 
-                // Ignore the Silhouette dataset (index 0) if it accidentally captures click
-                if (datasetIndex === 0) return;
-                
-                // Map dataset index back to symbol. 
-                // Note: datasets array has envelope at 0, so asset datasets are at index 1...N
-                // symbolArray index is (datasetIndex - 1)
-                const symbolIdx = datasetIndex - 1;
-                if (symbolIdx >= 0 && symbolIdx < symbolsArray.length) {
-                    const sym = symbolsArray[symbolIdx].sym;
-                    router.navigate('symbol', sym);
-                }
-            };
+                const points = investedData.map(pt => ({x: pt.x * 1000, y: pt.y}));
+                const color = colorPalette[idx % colorPalette.length];
 
-            chartInstances.home = new Chart(document.getElementById('homeChart'), {
-                type: 'line',
-                data: { datasets },
-                options: homeOptions
+                // Create Container for this specific chart
+                const container = document.createElement('div');
+                container.className = "flex flex-col mb-4";
+                
+                // Create unique ID
+                const canvasId = `chart-home-${sym}`;
+                
+                container.innerHTML = `
+                    <div class="flex justify-between items-baseline mb-2 border-b border-gray-100 pb-1 cursor-pointer hover:opacity-70 transition" onclick="router.navigate('symbol', '${sym}')">
+                        <h3 class="text-xl font-light text-black tracking-wide">${sym}</h3>
+                        <span class="text-xs text-gray-400 font-mono">DETAIL &rarr;</span>
+                    </div>
+                    <div class="h-[200px] w-full relative">
+                        <canvas id="${canvasId}"></canvas>
+                    </div>
+                `;
+                
+                grid.appendChild(container);
+
+                // Initialize Chart
+                const ctx = document.getElementById(canvasId).getContext('2d');
+                
+                // On-click event specifically for this chart
+                const specificOptions = JSON.parse(JSON.stringify(minimalChartOptions));
+                specificOptions.onClick = () => router.navigate('symbol', sym);
+
+                const newChart = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        datasets: [{
+                            label: sym,
+                            data: points,
+                            borderColor: color,
+                            borderWidth: 2,
+                            tension: 0.3,
+                            // White fill to cover background image (Silhouette effect)
+                            fill: 'start', 
+                            backgroundColor: '#ffffff',
+                            pointHoverRadius: 6,
+                            pointHoverBackgroundColor: color,
+                            pointHoverBorderColor: '#fff'
+                        }]
+                    },
+                    options: specificOptions
+                });
+                
+                homeChartInstances.push(newChart);
             });
         }
 
