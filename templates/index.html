@@ -10,539 +10,314 @@
     <script src="https://cdn.jsdelivr.net/npm/luxon"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon"></script>
     
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@100;200;300;400;500;600&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 
-    <script>
-        tailwind.config = {
-            theme: {
-                extend: {
-                    fontFamily: { 
-                        sans: ['Inter', 'sans-serif'],
-                        mono: ['JetBrains Mono', 'monospace'] 
-                    }
-                }
-            }
-        }
-    </script>
     <style>
-        body { 
-            background-color: #ffffff; 
-            color: #1a1a1a; 
-            font-family: 'Inter', sans-serif; 
-            
-            /* Background Image Setup */
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #ffffff;
+            color: #1a1a1a;
+            height: 100vh;
+            overflow: hidden; /* No scrolling on main body */
+        }
+        
+        /* Background Logo */
+        .bg-logo {
+            position: absolute;
+            top: 50%; left: 62.5%; /* Center of the right 75% area */
+            transform: translate(-50%, -50%);
+            width: 400px;
+            height: 400px;
             background-image: url('https://i.postimg.cc/QxYJKvBy/1767741251392.png');
             background-repeat: no-repeat;
-            background-position: top center;
-            background-size: 100% auto;
-            background-attachment: scroll;
+            background-position: center;
+            background-size: contain;
+            opacity: 0.15; /* 50% usually interferes too much with charts, tuned to 15% for readability, or strictly 0.5 if requested */
+            opacity: 0.5; 
+            pointer-events: none;
+            z-index: 0;
         }
 
-        @media (min-width: 768px) {
-            body {
-                background-size: 600px auto;
-            }
+        .chart-container {
+            position: relative;
+            z-index: 10;
         }
-        
-        /* Clinical Minimalism */
-        .page-container { max-width: 1000px; margin: 0 auto; padding: 120px 0 40px 0; }
-        
-        .content-pad { padding-left: 20px; padding-right: 20px; }
-        
-        /* Typography */
-        h1, h2, h3 { font-weight: 400; letter-spacing: -0.02em; }
-        
-        /* Brand Styling */
-        .brand-text {
-            font-weight: 200; 
-            font-size: 2.25rem; letter-spacing: 0.4em;
-            text-transform: uppercase; color: #1a1a1a;
-            opacity: 0; 
-        }
-        
-        /* Minimal Links */
-        .clinical-link { 
-            color: #1a1a1a; text-decoration: none; border-bottom: 1px solid #e5e5e5; 
-            padding-bottom: 2px; transition: all 0.2s; cursor: pointer; font-size: 0.9rem;
-        }
-        .clinical-link:hover { border-bottom-color: #1a1a1a; }
-        
-        /* Minimal Table */
-        .clean-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-        .clean-table th { text-align: left; font-weight: 500; color: #888; padding: 12px 0; border-bottom: 1px solid #e5e5e5; }
-        .clean-table td { padding: 12px 0; border-bottom: 1px solid #f0f0f0; font-family: 'JetBrains Mono', monospace; }
-        .clean-table tr:last-child td { border-bottom: none; }
 
-        /* Menu Overlay */
-        .menu-overlay {
-            position: fixed; top: 0; right: 0; width: 250px; height: 100vh; 
-            background: white; border-left: 1px solid #e5e5e5; 
-            transform: translateX(100%); transition: transform 0.3s ease; z-index: 100; padding: 40px;
+        /* Sidebar Item */
+        .asset-item {
+            cursor: pointer;
+            padding: 8px 0;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 1.1rem;
+            transition: opacity 0.2s;
+            opacity: 0.4;
         }
-        .menu-overlay.open { transform: translateX(0); }
-        .menu-backdrop {
-            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(255,255,255,0.8); backdrop-filter: blur(2px);
-            opacity: 0; pointer-events: none; transition: opacity 0.3s; z-index: 90;
+        .asset-item:hover { opacity: 0.8; }
+        .asset-item.active { opacity: 1; font-weight: 600; }
+
+        /* Color Mapping Classes will be applied via JS styles */
+        
+        /* Time Labels */
+        .time-label {
+            position: absolute;
+            left: 50%;
+            transform: translateX(-50%);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 2rem;
+            opacity: 0.2;
+            pointer-events: none;
+            z-index: 0;
         }
-        .menu-backdrop.open { opacity: 1; pointer-events: auto; }
-        
-        /* SPA Transitions */
-        .view-section { display: none; opacity: 0; transition: opacity 0.15s ease-in-out; }
-        .view-section.active { display: block; opacity: 1; }
-        
-        /* Chart Hover Group */
-        /* Only underline title on hover, keeps it clean */
-        .chart-row .row-header:hover .row-title { text-decoration: underline; color: black; }
-        /* Subtle background on the whole row helps separate them visually */
-        .chart-row:hover .row-bg { background-color: #fafafa; }
     </style>
 </head>
-<body class="antialiased min-h-screen">
+<body class="flex">
 
-    <div class="fixed top-8 left-1/2 transform -translate-x-1/2 z-50 cursor-pointer select-none" onclick="router.navigate('home')">
-        <h1 class="brand-text">Primate</h1>
-    </div>
+    <div class="bg-logo"></div>
 
-    <div class="fixed top-8 right-6 z-50 cursor-pointer p-2 hover:bg-gray-50 rounded-full" onclick="toggleMenu()">
-        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-gray-400 hover:text-black transition"><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle><circle cx="5" cy="12" r="1"></circle></svg>
-    </div>
-
-    <div class="menu-backdrop" id="menu-backdrop" onclick="toggleMenu()"></div>
-    <div class="menu-overlay" id="menu-panel">
-        <div class="flex flex-col space-y-6 mt-12">
-            <a onclick="router.navigate('home'); toggleMenu()" class="clinical-link">Home</a>
-            <a onclick="router.navigate('balance'); toggleMenu()" class="clinical-link">Balance</a>
-            <a onclick="router.navigate('log'); toggleMenu()" class="clinical-link">Log</a>
-            <a onclick="router.navigate('contact'); toggleMenu()" class="clinical-link">Contact</a>
+    <div class="w-1/4 h-full flex flex-col justify-between p-8 border-r border-black z-20 bg-white/90 backdrop-blur-sm">
+        <div>
+            <div class="mb-8 font-mono text-xs text-gray-400">ASSETS</div>
+            <div id="asset-list" class="flex flex-col gap-2 h-[70vh] overflow-y-auto no-scrollbar">
+                <div class="text-sm text-gray-400">Loading...</div>
+            </div>
+        </div>
+        
+        <div>
+            <button onclick="showContact()" class="text-lg font-light hover:underline">contact</button>
+            <div id="contact-info" class="text-sm font-mono mt-2 hidden text-gray-500">...</div>
         </div>
     </div>
 
-    <div class="page-container">
-
-        <div id="view-home" class="view-section active">
-            <div id="home-assets-list" class="flex flex-col gap-12">
-                <div class="text-center text-gray-300 text-sm font-mono mt-12">Loading observatory...</div>
+    <div class="w-3/4 h-full flex flex-col relative z-10">
+        
+        <div class="h-1/2 w-full border-b border-black relative p-6">
+            <div class="time-label top-10">1M</div>
+            <div class="h-full w-full">
+                <canvas id="topChart"></canvas>
             </div>
         </div>
 
-        <div id="view-symbol" class="view-section">
-            <div class="content-pad">
-                <div class="mb-8 cursor-pointer text-gray-400 hover:text-black text-sm w-max" onclick="router.navigate('home')">
-                    &larr; Back
-                </div>
-                
-                <div class="flex justify-between items-baseline mb-12">
-                    <h1 class="text-4xl font-extralight text-black" id="detail-title">--</h1>
-                    <div class="text-xl font-light font-mono" id="detail-pnl">--</div>
-                </div>
-            </div>
-
-            <div class="mb-12">
-                <div class="h-[300px] w-full relative">
-                    <canvas id="detailChart"></canvas>
-                </div>
-            </div>
-
-            <div class="content-pad">
-                <h3 class="text-xs uppercase text-gray-400 mb-4 tracking-widest">Active Orders</h3>
-                <table class="clean-table">
-                    <thead>
-                        <tr>
-                            <th>Type</th>
-                            <th>Side</th>
-                            <th>Size</th>
-                            <th>Price</th>
-                        </tr>
-                    </thead>
-                    <tbody id="detail-orders-body"></tbody>
-                </table>
-                <div id="detail-orders-empty" class="py-4 text-gray-400 text-sm font-mono hidden">No active orders.</div>
-            </div>
-        </div>
-
-        <div id="view-balance" class="view-section">
-            <div class="content-pad mb-8 text-sm text-gray-400">Portfolio Value</div>
-            <div class="h-[500px] w-full relative">
-                <canvas id="balanceChart"></canvas>
-            </div>
-        </div>
-
-        <div id="view-log" class="view-section">
-            <div class="content-pad">
-                <div class="mb-8 text-sm text-gray-400">System Log (Order History)</div>
-                <table class="clean-table">
-                    <thead>
-                        <tr>
-                            <th>Time</th>
-                            <th>Symbol</th>
-                            <th>Side</th>
-                            <th>Size</th>
-                            <th>Price</th>
-                        </tr>
-                    </thead>
-                    <tbody id="log-table-body"></tbody>
-                </table>
-                <div id="log-empty" class="py-12 text-center text-gray-400 font-mono hidden">No events found.</div>
-            </div>
-        </div>
-
-        <div id="view-contact" class="view-section">
-            <div class="flex flex-col items-center justify-center h-[60vh] content-pad">
-                <div class="text-sm text-gray-400 mb-2">Contact</div>
-                <div class="text-xl font-light font-mono border-b border-gray-200 pb-1" id="contact-email">
-                    Loading...
-                </div>
+        <div class="h-1/2 w-full relative p-6">
+            <div class="time-label top-10">1d</div>
+            <div class="h-full w-full">
+                <canvas id="bottomChart"></canvas>
             </div>
         </div>
 
     </div>
 
     <script>
-        const fmtUSD = (num) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(num);
-
-        // CONFIG: Smoother curves + better interaction
-        Chart.defaults.font.family = "'JetBrains Mono', monospace";
-        Chart.defaults.font.size = 11;
-        Chart.defaults.color = '#888';
-        Chart.defaults.plugins.tooltip.backgroundColor = 'rgba(255, 255, 255, 0.95)';
-        Chart.defaults.plugins.tooltip.titleColor = '#000';
-        Chart.defaults.plugins.tooltip.bodyColor = '#444';
-        Chart.defaults.plugins.tooltip.borderColor = '#e5e5e5';
-        Chart.defaults.plugins.tooltip.borderWidth = 1;
-        Chart.defaults.plugins.tooltip.padding = 10;
-        Chart.defaults.plugins.tooltip.displayColors = true; 
-        
-        const minimalChartOptions = {
-            responsive: true,
-            maintainAspectRatio: false,
-            layout: { padding: 0 }, 
-            interaction: { 
-                mode: 'nearest', 
-                axis: 'x', 
-                intersect: false 
-            },
-            hover: {
-                mode: 'nearest',
-                axis: 'x',
-                intersect: false
-            },
-            scales: {
-                x: { 
-                    type: 'time', 
-                    time: { unit: 'minute' }, 
-                    display: false, 
-                    grid: { display: false },
-                    offset: false,
-                    bounds: 'data'
-                },
-                y: { 
-                    display: false, 
-                    grid: { display: false },
-                    offset: false 
-                }
-            },
-            plugins: { 
-                legend: { display: false }
-            },
-            elements: {
-                point: { radius: 0, hitRadius: 20, hoverRadius: 6 }, 
-                line: { borderWidth: 2, tension: 0.3 }
-            }
-        };
-
-        const chartInstances = { 
-            home: [],
-            balance: null, 
-            detail: null 
-        };
-        
-        const colorPalette = [
+        // --- CONFIGURATION ---
+        // Specific asset colors as requested: 
+        // "blue, green, brown, red, yellow, light blue, light green, light red, light yellow, pink"
+        const colors = [
             '#2563eb', // Blue
-            '#dc2626', // Red
             '#16a34a', // Green
-            '#9333ea', // Purple
-            '#d97706', // Amber
-            '#0891b2', // Cyan
-            '#db2777', // Pink
-            '#4f46e5', // Indigo
-            '#ca8a04', // Yellow-Gold
-            '#000000'  // Black
+            '#854d0e', // Brown
+            '#dc2626', // Red
+            '#ca8a04', // Yellow
+            '#60a5fa', // Light Blue
+            '#4ade80', // Light Green
+            '#f87171', // Light Red
+            '#fde047', // Light Yellow
+            '#f472b6'  // Pink
         ];
 
-        function toggleMenu() {
-            document.getElementById('menu-panel').classList.toggle('open');
-            document.getElementById('menu-backdrop').classList.toggle('open');
+        let chartInstances = { top: null, bottom: null };
+        let activeSymbol = 'composite'; // 'composite' or symbol string
+
+        // Chart.js Globals
+        Chart.defaults.font.family = "'JetBrains Mono', monospace";
+        Chart.defaults.color = '#1a1a1a';
+        
+        // --- LOGIC ---
+
+        async function init() {
+            try {
+                const res = await fetch('/api/init');
+                const data = await res.json();
+                renderSidebar(data.symbols);
+                loadData('composite'); // Load default view
+            } catch (e) {
+                console.error(e);
+            }
         }
 
-        const router = {
-            navigate: (page, param = null) => {
-                document.querySelectorAll('.view-section').forEach(el => {
-                    el.classList.remove('active');
-                    setTimeout(() => { if(!el.classList.contains('active')) el.style.display = 'none'; }, 150);
-                });
-
-                const target = document.getElementById(page === 'symbol' ? 'view-symbol' : `view-${page}`);
-                target.style.display = 'block';
-                setTimeout(() => target.classList.add('active'), 10);
-
-                if (page === 'home') loadHomeData();
-                if (page === 'balance') loadBalanceData();
-                if (page === 'log') loadLogData();
-                if (page === 'contact') loadContactData();
-                if (page === 'symbol' && param) loadSymbolData(param);
-            }
-        };
-
-        async function loadHomeData() {
-            if (chartInstances.home.length > 0) {
-                chartInstances.home.forEach(c => c.destroy());
-                chartInstances.home = [];
-            }
-
-            let chartData;
-            try {
-                const chartRes = await fetch('/api/symbols_chart');
-                chartData = await chartRes.json();
-            } catch (e) {
-                chartData = {
-                    'BTC': { invested: Array.from({length: 20}, (_, i) => ({x: Date.now()/1000 - (20-i)*3600, y: 30000 + Math.random()*1000})) },
-                    'ETH': { invested: Array.from({length: 20}, (_, i) => ({x: Date.now()/1000 - (20-i)*3600, y: 2000 + Math.random()*100})) }
-                };
-            }
-            
-            const symbolsArray = Object.keys(chartData).map(sym => {
-                const investedData = chartData[sym].invested || [];
-                let maxVal = 0;
-                let lastVal = 0;
-                const validPoints = investedData.filter(d => d.y !== null);
-                if (validPoints.length > 0) {
-                    lastVal = validPoints[validPoints.length - 1].y;
-                    maxVal = Math.max(...validPoints.map(d => d.y));
-                }
-                return {
-                    sym,
-                    lastVal,
-                    maxVal,
-                    invested: investedData.map(pt => ({x: pt.x * 1000, y: pt.y}))
-                };
-            });
-
-            symbolsArray.sort((a, b) => b.maxVal - a.maxVal);
-
-            const container = document.getElementById('home-assets-list');
-            
-            if (symbolsArray.length === 0) {
-                container.innerHTML = '<div class="text-center text-gray-300 text-sm font-mono mt-12">No active assets found.</div>';
-                return;
-            }
-
+        function renderSidebar(symbols) {
+            const container = document.getElementById('asset-list');
             container.innerHTML = '';
 
-            symbolsArray.forEach((item, idx) => {
-                const color = colorPalette[idx % colorPalette.length];
-                const chartId = `chart-${item.sym}`;
-                
-                // IMPORTANT: 
-                // 1. Removed 'onclick' and 'cursor-pointer' from the outer .chart-row
-                // 2. Added 'onclick' and 'cursor-pointer' ONLY to the header div (.row-header)
-                const rowHtml = `
-                    <div class="chart-row relative w-full group transition-colors duration-200 rounded-sm">
-                        <div class="row-bg absolute inset-0 -mx-4 rounded-sm transition-colors duration-200 z-0"></div>
-                        
-                        <div class="relative z-10 flex flex-col h-[200px] w-full">
-                            <div class="row-header flex justify-between items-baseline mb-2 px-1 pt-2 cursor-pointer" onclick="router.navigate('symbol', '${item.sym}')">
-                                <div class="row-title text-2xl font-light text-gray-800 transition-colors group-hover:text-black">${item.sym}</div>
-                                <div class="text-sm font-mono text-gray-500">${fmtUSD(item.lastVal)}</div>
-                            </div>
-                            
-                            <div class="relative flex-grow w-full">
-                                <canvas id="${chartId}"></canvas>
-                            </div>
-                        </div>
-                    </div>
-                `;
-                
-                const tempDiv = document.createElement('div');
-                tempDiv.innerHTML = rowHtml;
-                container.appendChild(tempDiv.firstElementChild);
+            // Add "Composite" option implied as default state (or just resetting)
+            const resetDiv = document.createElement('div');
+            resetDiv.className = `asset-item ${activeSymbol === 'composite' ? 'active' : ''}`;
+            resetDiv.innerText = "PORTFOLIO";
+            resetDiv.onclick = () => { selectAsset('composite'); };
+            container.appendChild(resetDiv);
 
-                const ctx = document.getElementById(chartId).getContext('2d');
+            symbols.forEach((sym, idx) => {
+                const el = document.createElement('div');
+                el.className = `asset-item ${activeSymbol === sym ? 'active' : ''}`;
+                el.innerText = sym;
                 
-                // Gradient Fill Logic
-                const gradient = ctx.createLinearGradient(0, 0, 0, 200);
-                gradient.addColorStop(0, 'rgba(255,255,255, 0.8)'); 
-                gradient.addColorStop(1, 'rgba(255,255,255, 1)'); 
-
-                const chart = new Chart(ctx, {
-                    type: 'line',
-                    data: {
-                        datasets: [{
-                            data: item.invested,
-                            borderColor: color,
-                            borderWidth: 2,
-                            tension: 0.3,
-                            fill: 'start',
-                            backgroundColor: '#ffffff',
-                            pointHoverRadius: 6,
-                            pointRadius: 0
-                        }]
-                    },
-                    options: minimalChartOptions
-                });
+                // Store color index for retrieval
+                el.dataset.colorIndex = idx % colors.length;
+                el.style.color = colors[idx % colors.length];
                 
-                chartInstances.home.push(chart);
+                el.onclick = () => { selectAsset(sym, idx); };
+                container.appendChild(el);
             });
         }
 
-        async function loadBalanceData() {
-            let points;
+        function selectAsset(symbol, colorIdx = -1) {
+            activeSymbol = symbol;
+            
+            // Update sidebar visual state
+            document.querySelectorAll('.asset-item').forEach(el => {
+                el.classList.remove('active');
+                if(el.innerText === symbol || (symbol === 'composite' && el.innerText === 'PORTFOLIO')) {
+                    el.classList.add('active');
+                }
+            });
+
+            const color = symbol === 'composite' ? '#000000' : colors[colorIdx % colors.length];
+            loadData(symbol, color);
+        }
+
+        async function loadData(symbol, color = '#000000') {
             try {
-                const res = await fetch('/api/balance_history');
+                const res = await fetch(`/api/data/${symbol}`);
                 const data = await res.json();
-                points = data.map(d => ({ x: d.time * 1000, y: d.equity }));
+                
+                renderTopChart(data.top, color, symbol === 'composite');
+                renderBottomChart(data.bottom, color);
             } catch (e) {
-                points = Array.from({length: 20}, (_, i) => ({x: Date.now() - (20-i)*3600000, y: 50000 + i*100 + Math.random()*500}));
+                console.error("Failed to load chart data", e);
+            }
+        }
+
+        function renderTopChart(dataPoints, color, isComposite) {
+            const ctx = document.getElementById('topChart').getContext('2d');
+            
+            if (chartInstances.top) chartInstances.top.destroy();
+
+            // Prepare Datasets
+            const datasets = [{
+                data: dataPoints,
+                borderColor: color,
+                borderWidth: 2,
+                pointRadius: 0,
+                tension: 0.1, // Slight curve, mostly jagged like sketch
+                fill: false
+            }];
+
+            // If Composite, add the +5% and -5% lines
+            if (isComposite) {
+                // We simulate lines by adding datasets that span the x-axis range
+                // Since X is time, this is tricky without Min/Max known. 
+                // Using a plugin is cleaner, but here's a standard workaround:
+                // We rely on the grid lines or we don't draw them as data, but as annotations if possible.
+                // Simpler: Just rely on Chart.js grid configuration to highlight +5 and -5 ticks?
+                // Or: Add a dataset with constant values.
+                if (dataPoints.length > 0) {
+                    const startX = dataPoints[0].x;
+                    const endX = dataPoints[dataPoints.length-1].x;
+                    
+                    datasets.push({
+                        data: [{x: startX, y: 5}, {x: endX, y: 5}],
+                        borderColor: '#000000', borderWidth: 1, pointRadius: 0, borderDash: [5, 5], label: '+5%'
+                    });
+                    datasets.push({
+                        data: [{x: startX, y: -5}, {x: endX, y: -5}],
+                        borderColor: '#000000', borderWidth: 1, pointRadius: 0, borderDash: [5, 5], label: '-5%'
+                    });
+                }
             }
 
-            if (chartInstances.balance) chartInstances.balance.destroy();
-            chartInstances.balance = new Chart(document.getElementById('balanceChart'), {
+            chartInstances.top = new Chart(ctx, {
                 type: 'line',
+                data: { datasets: datasets },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: {
+                            type: 'time',
+                            time: { unit: 'day' },
+                            grid: { display: false },
+                            border: { display: false }
+                        },
+                        y: {
+                            position: 'right',
+                            grid: {
+                                color: (ctx) => (ctx.tick.value === 5 || ctx.tick.value === -5) && isComposite ? '#000000' : 'rgba(0,0,0,0.05)',
+                                lineWidth: (ctx) => (ctx.tick.value === 5 || ctx.tick.value === -5) && isComposite ? 1 : 1
+                            },
+                            ticks: {
+                                callback: function(value) { return value + '%' }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        function renderBottomChart(dataPoints, color) {
+            const ctx = document.getElementById('bottomChart').getContext('2d');
+            
+            if (chartInstances.bottom) chartInstances.bottom.destroy();
+
+            // If no data (Composite view usually has no "size"), show empty or handle gracefully
+            if (!dataPoints || dataPoints.length === 0) {
+                 // Clear canvas if needed or show "Select asset"
+                 return;
+            }
+
+            chartInstances.bottom = new Chart(ctx, {
+                type: 'bar',
                 data: {
                     datasets: [{
-                        data: points,
-                        borderColor: '#000000',
-                        borderWidth: 2,
-                        tension: 0.3,
-                        fill: 'start',      
-                        backgroundColor: '#ffffff'
+                        data: dataPoints.map(d => ({x: d.timestamp * 1000, y: d.qty})),
+                        backgroundColor: color,
+                        barThickness: 'flex',
+                        maxBarThickness: 10
                     }]
                 },
-                options: minimalChartOptions
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: {
+                            type: 'time',
+                            time: { unit: 'hour' }, // 15m data, show hour ticks
+                            grid: { display: false }
+                        },
+                        y: {
+                            position: 'right',
+                            grid: {
+                                color: (ctx) => ctx.tick.value === 0 ? '#000000' : 'rgba(0,0,0,0)',
+                                lineWidth: 1
+                            }
+                        }
+                    }
+                }
             });
         }
 
-        async function loadLogData() {
-            let history = [];
-            try {
-                const res = await fetch('/api/status');
-                const data = await res.json();
-                history = data.history || [];
-            } catch (e) {
-                history = [];
-            }
-            
-            const tbody = document.getElementById('log-table-body');
-            
-            if (history.length > 0) {
-                tbody.innerHTML = history.map(item => {
-                    const time = item.timestamp * 1000;
-                    const type = item.type || 'LIMIT';
-                    const side = item.side ? item.side.toLowerCase() : '--';
-                    const symbol = item.symbol || '--';
-                    const size = item.size || '--';
-                    const price = item.price || 'MKT';
-                    const sideClass = side === 'buy' ? 'text-green-700' : (side === 'sell' ? 'text-red-700' : 'text-gray-600');
-                    
-                    return `
-                    <tr>
-                        <td class="text-gray-500 text-xs font-mono">${new Date(time).toLocaleString()}</td>
-                        <td>
-                            <b>${symbol}</b>
-                            <span class="text-xs text-gray-400 ml-1 uppercase border border-gray-100 px-1 rounded">${type}</span>
-                        </td>
-                        <td class="${sideClass} uppercase font-medium text-xs">${side}</td>
-                        <td class="text-gray-700 font-mono">${size}</td>
-                        <td class="text-gray-700 font-mono text-xs">${price !== 'MKT' ? '$' + price : price}</td>
-                    </tr>
-                `;
-                }).join('');
-                document.getElementById('log-empty').classList.add('hidden');
-            } else {
-                tbody.innerHTML = '';
-                document.getElementById('log-empty').classList.remove('hidden');
-                document.getElementById('log-empty').innerText = "No history found.";
-            }
-        }
-
-        async function loadSymbolData(symbol) {
-            document.getElementById('detail-title').innerText = symbol;
-            
-            let history = [];
-            let orders = [];
-            
-            try {
-                const detailRes = await fetch(`/api/symbol_detail/${symbol}`);
-                const detail = await detailRes.json();
-                history = detail.pnl_history || [];
-                orders = detail.orders || [];
-            } catch (e) {
-                history = Array.from({length: 10}, (_, i) => ({x: Date.now()/1000 - i*3600, y: Math.random() * 100 - 50}));
-            }
-            
-            const lastPnlValue = history.length > 0 ? history[history.length - 1].y : 0;
-            const pnlEl = document.getElementById('detail-pnl');
-            
-            if (lastPnlValue !== null && lastPnlValue !== undefined) {
-                pnlEl.innerText = (lastPnlValue >= 0 ? '+' : '') + fmtUSD(lastPnlValue);
-                pnlEl.style.color = lastPnlValue >= 0 ? '#1a1a1a' : '#dc2626'; 
-            } else {
-                pnlEl.innerText = "--";
-                pnlEl.style.color = "#888";
-            }
-
-            if (chartInstances.detail) chartInstances.detail.destroy();
-            chartInstances.detail = new Chart(document.getElementById('detailChart'), {
-                type: 'line',
-                data: {
-                    datasets: [{
-                        data: history.map(d => ({ x: d.x * 1000, y: d.y })),
-                        borderColor: '#000000',
-                        borderWidth: 2,
-                        fill: 'start',
-                        backgroundColor: '#ffffff', 
-                        tension: 0.3,
-                        spanGaps: false
-                    }]
-                },
-                options: minimalChartOptions
-            });
-
-            const ordBody = document.getElementById('detail-orders-body');
-            if (orders.length > 0) {
-                ordBody.innerHTML = orders.map(o => {
-                    const filled = parseFloat(o.filledSize) || 0;
-                    const unfilled = parseFloat(o.unfilledSize) || 0;
-                    const totalSize = filled + unfilled;
-                    
-                    return `
-                    <tr>
-                        <td class="uppercase text-xs tracking-wider">${o.orderType}</td>
-                        <td class="${o.side === 'buy' ? 'text-green-700' : 'text-red-700'}">${o.side}</td>
-                        <td class="font-mono">${totalSize}</td>
-                        <td class="font-mono">$${o.limitPrice || o.stopPrice || 'MKT'}</td>
-                    </tr>
-                `;
-                }).join('');
-                document.getElementById('detail-orders-empty').classList.add('hidden');
-            } else {
-                ordBody.innerHTML = '';
-                document.getElementById('detail-orders-empty').classList.remove('hidden');
-            }
-        }
-
-        async function loadContactData() {
+        async function showContact() {
             try {
                 const res = await fetch('/api/contact');
                 const data = await res.json();
-                document.getElementById('contact-email').innerText = data.email || "Loading failed";
-            } catch (e) {
-                document.getElementById('contact-email').innerText = "contact@primate.obs";
-            }
+                const el = document.getElementById('contact-info');
+                el.innerText = data.email;
+                el.classList.remove('hidden');
+            } catch(e) {}
         }
 
-        router.navigate('home');
+        // Init
+        init();
+
     </script>
 </body>
 </html>
