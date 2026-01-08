@@ -95,14 +95,17 @@
 </head>
 <body class="antialiased min-h-screen">
 
+    <!-- Header / Logo Click Area -->
     <div class="fixed top-8 left-1/2 transform -translate-x-1/2 z-50 cursor-pointer select-none" onclick="router.navigate('home')">
         <h1 class="brand-text">Primate</h1>
     </div>
 
+    <!-- Burger Menu Icon -->
     <div class="fixed top-8 right-6 z-50 cursor-pointer p-2 hover:bg-gray-50 rounded-full" onclick="toggleMenu()">
         <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-gray-400 hover:text-black transition"><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle><circle cx="5" cy="12" r="1"></circle></svg>
     </div>
 
+    <!-- Menu Panel -->
     <div class="menu-backdrop" id="menu-backdrop" onclick="toggleMenu()"></div>
     <div class="menu-overlay" id="menu-panel">
         <div class="flex flex-col space-y-6 mt-12">
@@ -115,6 +118,7 @@
 
     <div class="page-container">
 
+        <!-- HOME VIEW -->
         <div id="view-home" class="view-section active">
             <div class="mb-12">
                 <div class="h-[400px] w-full relative">
@@ -127,6 +131,7 @@
             </div>
         </div>
 
+        <!-- SYMBOL DETAIL VIEW -->
         <div id="view-symbol" class="view-section">
             <div class="content-pad">
                 <div class="mb-8 cursor-pointer text-gray-400 hover:text-black text-sm w-max" onclick="router.navigate('home')">
@@ -162,6 +167,7 @@
             </div>
         </div>
 
+        <!-- BALANCE VIEW -->
         <div id="view-balance" class="view-section">
             <div class="content-pad mb-8 text-sm text-gray-400">Portfolio Value</div>
             <div class="h-[500px] w-full relative">
@@ -169,6 +175,7 @@
             </div>
         </div>
 
+        <!-- LOG VIEW (History) -->
         <div id="view-log" class="view-section">
             <div class="content-pad">
                 <div class="mb-8 text-sm text-gray-400">System Log (Order History)</div>
@@ -188,6 +195,7 @@
             </div>
         </div>
 
+        <!-- CONTACT VIEW -->
         <div id="view-contact" class="view-section">
             <div class="flex flex-col items-center justify-center h-[60vh] content-pad">
                 <div class="text-sm text-gray-400 mb-2">Contact</div>
@@ -297,44 +305,61 @@
                 };
             });
             
-            // Sort by MAX value (Descending) so largest is at bottom of stack
+            // Sort by MAX value (Descending)
             symbolsArray.sort((a, b) => b.maxVal - a.maxVal);
 
             const grid = document.getElementById('symbol-links-container');
             if (symbolsArray.length === 0) {
                 grid.innerHTML = '<div class="col-span-full text-center text-gray-300 text-sm font-mono">No data available</div>';
             } else {
-                grid.innerHTML = symbolsArray.map(item => `
+                // We'll also apply colors to the legend text
+                const legendColors = [
+                    '#000000', '#2563eb', '#dc2626', '#16a34a', '#9333ea', 
+                    '#d97706', '#0891b2', '#4b5563', '#be123c', '#0f766e'
+                ];
+                
+                grid.innerHTML = symbolsArray.map((item, idx) => {
+                    const color = legendColors[idx % legendColors.length];
+                    return `
                     <div onclick="router.navigate('symbol', '${item.sym}')" 
-                         class="text-center py-4 border border-transparent hover:border-gray-100 rounded cursor-pointer transition text-sm text-gray-600 hover:text-black">
+                         class="text-center py-4 border border-transparent hover:border-gray-100 rounded cursor-pointer transition text-sm hover:text-black"
+                         style="color: ${color}">
                         <div class="font-medium">${item.sym}</div>
                     </div>
-                `).join('');
+                `}).join('');
             }
+            
+            // Palette for the chart lines
+            const lineColors = [
+                '#000000', // Black
+                '#2563eb', // Blue
+                '#dc2626', // Red
+                '#16a34a', // Green
+                '#9333ea', // Purple
+                '#d97706', // Orange
+                '#0891b2', // Cyan/Teal
+                '#4b5563', // Gray
+                '#be123c', // Rose
+                '#0f766e'  // Dark Teal
+            ];
 
             const datasets = symbolsArray.map((item, idx) => {
                 return {
                     label: item.sym,
                     data: item.invested,
-                    borderColor: '#000000', 
+                    borderColor: lineColors[idx % lineColors.length], // Cycle through colors
                     borderWidth: 2,
                     stepped: true,
-                    // STACKED CHART CONFIGURATION
-                    fill: 'origin',           // Fill to bottom (or previous stack)
-                    backgroundColor: '#ffffff' // White fill blocks the background
+                    fill: false,
+                    backgroundColor: 'transparent'
                 };
             });
 
             if (chartInstances.home) chartInstances.home.destroy();
-            
-            // Create Stacked Chart to achieve the "Mountain" effect + "Cutout"
-            const homeOptions = JSON.parse(JSON.stringify(minimalChartOptions));
-            homeOptions.scales.y.stacked = true; // Enable stacking
-
             chartInstances.home = new Chart(document.getElementById('homeChart'), {
                 type: 'line',
                 data: { datasets },
-                options: homeOptions
+                options: minimalChartOptions
             });
         }
 
@@ -481,3 +506,5 @@
     </script>
 </body>
 </html>
+
+
