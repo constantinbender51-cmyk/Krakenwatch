@@ -302,17 +302,18 @@
                     sym,
                     lastVal,
                     maxVal,
+                    // Ensure x is in milliseconds for Chart.js
                     invested: investedData.map(pt => ({x: pt.x * 1000, y: pt.y}))
                 };
             });
             
             // 1. Calculate the Envelope (Silhouette)
-            // Group values by timestamp
+            // Group values by timestamp to find the MAX value at every time point
             const timeMap = new Map();
             symbolsArray.forEach(item => {
                 item.invested.forEach(pt => {
-                    // Normalize timestamp to integer if needed
-                    const t = Math.floor(pt.x * 1000); 
+                    // Normalize timestamp to integer. pt.x is already in milliseconds here.
+                    const t = Math.floor(pt.x); 
                     if (!timeMap.has(t)) timeMap.set(t, []);
                     timeMap.get(t).push(pt.y);
                 });
@@ -342,7 +343,7 @@
             };
             
             // 2. Sort Regular Datasets
-            // Sort by MAX value (Descending)
+            // Sort by MAX value (Descending) so larger overall trends are behind smaller ones
             symbolsArray.sort((a, b) => b.maxVal - a.maxVal);
 
             const grid = document.getElementById('symbol-links-container');
