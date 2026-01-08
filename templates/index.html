@@ -290,15 +290,60 @@
             
             const symbolsArray = Object.keys(chartData).map(sym => {
                 const investedData = chartData[sym].invested || [];
-                const lastVal = investedData.length > 0 ? investedData[investedData.length - 1].y : 0;
+                // Calculate Max Value to sort by "Highest Peak"
+                let maxVal = 0;
+                let lastVal = 0;
+                if (investedData.length > 0) {
+                    lastVal = investedData[investedData.length - 1].y;
+                    maxVal = Math.max(...investedData.map(d => d.y));
+                }
+
                 return {
                     sym,
                     lastVal,
+                    maxVal,
                     invested: investedData.map(pt => ({x: pt.x * 1000, y: pt.y}))
                 };
             });
-            // Sort by value (Descending), so large areas are drawn first (in the back)
-            symbolsArray.sort((a, b) => b.lastVal - a.lastVal);
+            
+            // 1. Calculate the Envelope (Silhouette)
+            // Group values by timestamp
+            const timeMap = new Map();
+            symbolsArray.forEach(item => {
+                item.invested.forEach(pt => {
+                    // Normalize timestamp to integer if needed
+                    const t = Math.floor(pt.x * 1000); 
+                    if (!timeMap.has(t)) timeMap.set(t, []);
+                    timeMap.get(t).push(pt.y);
+                });
+            });
+            
+            // Sort unique timestamps
+            const sortedTimes = Array.from(timeMap.keys()).sort((a, b) => a - b);
+            
+            // Create Max Points
+            const envelopeData = sortedTimes.map(t => {
+                const values = timeMap.get(t);
+                const maxVal = Math.max(0, ...values); 
+                return { x: t, y: maxVal };
+            });
+
+            // The Silhouette Dataset (White Mountain)
+            // Drawn first, fills to bottom with white, blocking the background image
+            const envelopeDataset = {
+                label: 'Silhouette',
+                data: envelopeData,
+                borderColor: 'transparent',
+                pointRadius: 0,
+                borderWidth: 0,
+                stepped: true,
+                fill: 'start',      
+                backgroundColor: '#ffffff' // This white fill blocks the body background image
+            };
+            
+            // 2. Sort Regular Datasets
+            // Sort by MAX value (Descending)
+            symbolsArray.sort((a, b) => b.maxVal - a.maxVal);
 
             const grid = document.getElementById('symbol-links-container');
             if (symbolsArray.length === 0) {
@@ -312,17 +357,20 @@
                 `).join('');
             }
 
-            const datasets = symbolsArray.map((item, idx) => {
+            const lineDatasets = symbolsArray.map((item, idx) => {
                 return {
                     label: item.sym,
                     data: item.invested,
-                    borderColor: `rgba(0,0,0, ${0.8 - (idx * 0.15)})`, 
+                    borderColor: '#000000', 
                     borderWidth: 2,
                     stepped: true,
-                    fill: 'start',      
-                    backgroundColor: '#ffffff' 
+                    fill: false,        // DISABLED FILL to prevent overlay issues
+                    backgroundColor: 'transparent' 
                 };
             });
+            
+            // Combine: Silhouette first, then lines
+            const datasets = [envelopeDataset, ...lineDatasets];
 
             if (chartInstances.home) chartInstances.home.destroy();
             chartInstances.home = new Chart(document.getElementById('homeChart'), {
@@ -351,7 +399,7 @@
                         borderColor: '#000000',
                         borderWidth: 2,
                         fill: 'start',      
-                        backgroundColor: '#ffffff', 
+                        backgroundColor: '#ffffff', // Keep fill for single line charts (Balance)
                         stepped: true
                     }]
                 },
@@ -433,7 +481,7 @@
                         borderColor: '#000000',
                         borderWidth: 2,
                         fill: 'start',
-                        backgroundColor: '#ffffff', 
+                        backgroundColor: '#ffffff', // Keep fill for single line charts (Symbol)
                         stepped: true
                     }]
                 },
