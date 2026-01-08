@@ -30,9 +30,8 @@ from flask import Flask, render_template, jsonify, g
 try:
     from kraken_futures import KrakenFuturesApi
 except ImportError:
+    # If library is missing, we log it but don't crash immediately to allow UI testing
     print("CRITICAL: 'kraken_futures.py' not found in directory.")
-    # For local testing without the lib, we might pass, but in prod this is fatal
-    # sys.exit(1) 
     pass
 
 # Configure Logging
@@ -77,7 +76,6 @@ def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     
-    # Table for account balance history
     c.execute('''CREATE TABLE IF NOT EXISTS account_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         timestamp REAL,
@@ -86,7 +84,6 @@ def init_db():
         margin_utilized REAL
     )''')
 
-    # Table for symbol history (prices/pnl)
     c.execute('''CREATE TABLE IF NOT EXISTS symbol_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         timestamp REAL,
@@ -99,7 +96,6 @@ def init_db():
         pnl_usd REAL
     )''')
     
-    # Table for order log (cumulative history of open orders)
     c.execute('''CREATE TABLE IF NOT EXISTS order_log (
         order_id TEXT PRIMARY KEY,
         timestamp REAL,
@@ -111,7 +107,6 @@ def init_db():
         raw_data TEXT
     )''')
 
-    # Table for current state (State Store)
     c.execute('''CREATE TABLE IF NOT EXISTS current_state (
         key TEXT PRIMARY KEY,
         data TEXT,
