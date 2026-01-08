@@ -93,7 +93,9 @@
         .view-section.active { display: block; opacity: 1; }
         
         /* Chart Hover Group */
-        .chart-row:hover .row-title { text-decoration: underline; color: black; }
+        /* Only underline title on hover, keeps it clean */
+        .chart-row .row-header:hover .row-title { text-decoration: underline; color: black; }
+        /* Subtle background on the whole row helps separate them visually */
         .chart-row:hover .row-bg { background-color: #fafafa; }
     </style>
 </head>
@@ -251,12 +253,11 @@
         };
 
         const chartInstances = { 
-            home: [], // Changed to Array for multiple charts
+            home: [],
             balance: null, 
             detail: null 
         };
         
-        // Palette for the chart lines
         const colorPalette = [
             '#2563eb', // Blue
             '#dc2626', // Red
@@ -295,7 +296,6 @@
         };
 
         async function loadHomeData() {
-            // Cleanup existing charts
             if (chartInstances.home.length > 0) {
                 chartInstances.home.forEach(c => c.destroy());
                 chartInstances.home = [];
@@ -306,7 +306,6 @@
                 const chartRes = await fetch('/api/symbols_chart');
                 chartData = await chartRes.json();
             } catch (e) {
-                // Mock fallback
                 chartData = {
                     'BTC': { invested: Array.from({length: 20}, (_, i) => ({x: Date.now()/1000 - (20-i)*3600, y: 30000 + Math.random()*1000})) },
                     'ETH': { invested: Array.from({length: 20}, (_, i) => ({x: Date.now()/1000 - (20-i)*3600, y: 2000 + Math.random()*100})) }
@@ -315,7 +314,6 @@
             
             const symbolsArray = Object.keys(chartData).map(sym => {
                 const investedData = chartData[sym].invested || [];
-                // Calculate stats
                 let maxVal = 0;
                 let lastVal = 0;
                 const validPoints = investedData.filter(d => d.y !== null);
@@ -331,7 +329,6 @@
                 };
             });
 
-            // Sort by Max Value
             symbolsArray.sort((a, b) => b.maxVal - a.maxVal);
 
             const container = document.getElementById('home-assets-list');
@@ -341,20 +338,22 @@
                 return;
             }
 
-            container.innerHTML = ''; // Clear loading
+            container.innerHTML = '';
 
             symbolsArray.forEach((item, idx) => {
                 const color = colorPalette[idx % colorPalette.length];
                 const chartId = `chart-${item.sym}`;
                 
-                // HTML Layout for one asset row
+                // IMPORTANT: 
+                // 1. Removed 'onclick' and 'cursor-pointer' from the outer .chart-row
+                // 2. Added 'onclick' and 'cursor-pointer' ONLY to the header div (.row-header)
                 const rowHtml = `
-                    <div class="chart-row relative w-full cursor-pointer group transition-colors duration-200 rounded-sm" onclick="router.navigate('symbol', '${item.sym}')">
+                    <div class="chart-row relative w-full group transition-colors duration-200 rounded-sm">
                         <div class="row-bg absolute inset-0 -mx-4 rounded-sm transition-colors duration-200 z-0"></div>
                         
                         <div class="relative z-10 flex flex-col h-[200px] w-full">
-                            <div class="flex justify-between items-baseline mb-2 px-1 pt-2">
-                                <div class="row-title text-2xl font-light text-gray-800 transition-colors">${item.sym}</div>
+                            <div class="row-header flex justify-between items-baseline mb-2 px-1 pt-2 cursor-pointer" onclick="router.navigate('symbol', '${item.sym}')">
+                                <div class="row-title text-2xl font-light text-gray-800 transition-colors group-hover:text-black">${item.sym}</div>
                                 <div class="text-sm font-mono text-gray-500">${fmtUSD(item.lastVal)}</div>
                             </div>
                             
@@ -365,17 +364,14 @@
                     </div>
                 `;
                 
-                // Append string as HTML
                 const tempDiv = document.createElement('div');
                 tempDiv.innerHTML = rowHtml;
                 container.appendChild(tempDiv.firstElementChild);
 
-                // Init Chart
                 const ctx = document.getElementById(chartId).getContext('2d');
                 
-                // Create gradient for fill
+                // Gradient Fill Logic
                 const gradient = ctx.createLinearGradient(0, 0, 0, 200);
-                // Very subtle opacity for the fill to keep it clean
                 gradient.addColorStop(0, 'rgba(255,255,255, 0.8)'); 
                 gradient.addColorStop(1, 'rgba(255,255,255, 1)'); 
 
@@ -387,8 +383,8 @@
                             borderColor: color,
                             borderWidth: 2,
                             tension: 0.3,
-                            fill: 'start', // Fill area below
-                            backgroundColor: '#ffffff', // White opaque fill to create the "mountain" effect against lines behind, though here they are separate
+                            fill: 'start',
+                            backgroundColor: '#ffffff',
                             pointHoverRadius: 6,
                             pointRadius: 0
                         }]
