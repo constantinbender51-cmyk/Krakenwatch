@@ -11,7 +11,6 @@ UPDATES:
 - Log Page now shows a cumulative history of all open orders ever found.
 - Language reverted to English.
 - Corrected Order Size calculation (Unfilled + Filled).
-- ADDED: Gap detection for charts. Returns 0 for value and null for PnL when no position exists.
 """
 
 import os
@@ -22,7 +21,7 @@ import threading
 import sqlite3
 import logging
 from datetime import datetime
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 
 from flask import Flask, render_template, jsonify, g
 
@@ -30,9 +29,8 @@ from flask import Flask, render_template, jsonify, g
 try:
     from kraken_futures import KrakenFuturesApi
 except ImportError:
-    # If library is missing, we log it but don't crash immediately to allow UI testing
     print("CRITICAL: 'kraken_futures.py' not found in directory.")
-    pass
+    sys.exit(1)
 
 # Configure Logging
 logging.basicConfig(
@@ -46,7 +44,6 @@ logger = logging.getLogger("Primate")
 # ------------------------------------------------------------------
 DB_FILE = os.getenv('DB_FILE_PATH', 'primate.db')
 FETCH_INTERVAL = 10  # seconds
-GAP_THRESHOLD = 30   # seconds (if gap > this, assume position closed/missing)
 API_KEY = os.getenv("KRAKEN_KEY", "")
 API_SECRET = os.getenv("KRAKEN_SECRET", "")
 CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "contact@companyprimate.com")
@@ -76,6 +73,7 @@ def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     
+    # Table for account balance history
     c.execute('''CREATE TABLE IF NOT EXISTS account_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         timestamp REAL,
@@ -84,6 +82,7 @@ def init_db():
         margin_utilized REAL
     )''')
 
+    # Table for symbol history (prices/pnl)
     c.execute('''CREATE TABLE IF NOT EXISTS symbol_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         timestamp REAL,
@@ -96,6 +95,7 @@ def init_db():
         pnl_usd REAL
     )''')
     
+    # NEW: Table for order log (cumulative history of open orders)
     c.execute('''CREATE TABLE IF NOT EXISTS order_log (
         order_id TEXT PRIMARY KEY,
         timestamp REAL,
@@ -107,6 +107,7 @@ def init_db():
         raw_data TEXT
     )''')
 
+    # Table for current state (State Store)
     c.execute('''CREATE TABLE IF NOT EXISTS current_state (
         key TEXT PRIMARY KEY,
         data TEXT,
@@ -155,27 +156,37 @@ def save_snapshot(equity, balance, margin, positions_list, tickers_list):
         logger.error(f"DB Write Error (Snapshot): {e}")
 
 def save_found_orders(orders_list):
+    """
+    Saves newly found order events (history) to the persistent log.
+    Uses INSERT OR IGNORE to avoid duplicates based on order_id.
+    """
     try:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         
         count = 0
         for o in orders_list:
+            # Kraken Futures Order ID
             oid = o.get('orderId')
             if not oid: continue
             
+            # Use Kraken's timestamp for historical accuracy, convert from ms to s
             order_time_ms = o.get('timestamp')
+            # Fallback to current time if timestamp is missing or invalid
             order_timestamp = float(order_time_ms) / 1000 if isinstance(order_time_ms, (int, float)) else time.time()
             
-            symbol = o.get('tradeable') 
-            side = o.get('direction', 'buy')
+            symbol = o.get('tradeable') # Use 'tradeable' for symbol in history API
+            side = o.get('direction', 'buy') # Use 'direction' for side in history API
             
+            # --- CORRECTED SIZE CALCULATION ---
             unfilled = float(o.get('unfilledSize', 0))
             filled = float(o.get('filledSize', 0))
             size = unfilled + filled
             
+            # Price for history items can be 'limitPrice', 'stopPrice', 'price', or 'fillPrice'
+            # Prioritize limitPrice, then fillPrice, default to 0 if not found.
             price = float(o.get('limitPrice', 0) or o.get('fillPrice', 0))
-            otype = o.get('orderType', 'limit')
+            otype = o.get('orderType', 'limit') # e.g., 'Limit', 'Market', 'Stop', 'TakeProfit'
 
             c.execute('''INSERT OR IGNORE INTO order_log 
                 (order_id, timestamp, symbol, side, size, price, order_type, raw_data)
@@ -211,12 +222,7 @@ def update_current_state(key, data):
 # ------------------------------------------------------------------
 def fetch_worker():
     logger.info("Starting background fetcher...")
-    try:
-        from kraken_futures import KrakenFuturesApi
-        api = KrakenFuturesApi(API_KEY, API_SECRET)
-    except Exception as e:
-        logger.error(f"Failed to init Kraken API: {e}")
-        return
+    api = KrakenFuturesApi(API_KEY, API_SECRET)
 
     while True:
         try:
@@ -227,17 +233,22 @@ def fetch_worker():
             orders_resp = api.get_open_orders()
             tickers_resp = api.get_tickers()
             
+            # --- ORDER HISTORY LOGIC ---
+            # Capture currently open orders and persist them
             open_orders = orders_resp.get('openOrders', [])
             save_found_orders(open_orders)
+            # ---------------------------
 
             tickers = tickers_resp.get('tickers', [])
             positions = positions_resp.get('openPositions', [])
 
+            # --- PNL CALCULATION ---
             mark_map = {t['symbol']: float(t.get('markPrice', 0)) for t in tickers if 'symbol' in t}
 
             for p in positions:
                 symbol = p.get('symbol')
                 if not symbol: continue
+                
                 try:
                     entry_price = float(p.get('price', 0))
                     size = float(p.get('size', 0))
@@ -252,6 +263,7 @@ def fetch_worker():
                     p['pnl'] = calculated_pnl
                 except (ValueError, TypeError):
                     p['pnl'] = 0.0
+            # -------------------------------
 
             total_equity = 0.0
             total_balance = 0.0
@@ -263,8 +275,10 @@ def fetch_worker():
                 flex_acc = res['flex']
                 total_equity = float(flex_acc.get('marginEquity', 0))
                 total_balance = float(flex_acc.get('balance', 0))
+                
                 aux = flex_acc.get('auxiliary', {})
                 margin = float(flex_acc.get('marginUsed', aux.get('usedMargin', 0)))
+                logger.info(f"Flex Sync: Equity=${total_equity:.2f}")
             else:
                 for acc_key, acc_val in res.items():
                     if isinstance(acc_val, dict):
@@ -277,6 +291,7 @@ def fetch_worker():
             update_current_state('positions', positions)
             update_current_state('orders', open_orders)
             update_current_state('tickers', tickers)
+            
             update_current_state('meta', {
                 'last_update': time.time(),
                 'equity': total_equity,
@@ -289,40 +304,6 @@ def fetch_worker():
 
         elapsed = time.time() - start_time
         time.sleep(max(1, FETCH_INTERVAL - elapsed))
-
-# ------------------------------------------------------------------
-# HELPER: GAP FILLING
-# ------------------------------------------------------------------
-def process_series_with_gaps(rows, value_key, gap_mode='zero'):
-    """
-    Injects gap points into a time series.
-    gap_mode: 'zero' (for value charts) -> drops to 0
-              'null' (for pnl charts) -> breaks line with None
-    """
-    if not rows:
-        return []
-
-    data = []
-    prev_ts = None
-    
-    for r in rows:
-        curr_ts = r['timestamp']
-        val = r[value_key]
-        
-        if prev_ts is not None:
-            # If gap > threshold, we missed a snapshot or position was closed
-            if (curr_ts - prev_ts) > GAP_THRESHOLD:
-                # Insert gap point just after previous
-                fill_val = 0 if gap_mode == 'zero' else None
-                data.append({'x': prev_ts + 1, 'y': fill_val})
-                # If zero mode, we also want it to be zero just before current
-                if gap_mode == 'zero':
-                    data.append({'x': curr_ts - 1, 'y': 0})
-        
-        data.append({'x': curr_ts, 'y': val})
-        prev_ts = curr_ts
-        
-    return data
 
 # ------------------------------------------------------------------
 # FLASK WEB APP
@@ -348,11 +329,16 @@ def api_contact():
 
 @app.route('/api/status')
 def api_status():
+    """
+    Returns status for the Log page.
+    Now retrieves real history from the 'order_log' database table.
+    """
     try:
         conn = get_db()
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
         
+        # Get the last 100 orders from the persistent history
         cur.execute("SELECT * FROM order_log ORDER BY timestamp DESC LIMIT 100")
         rows = cur.fetchall()
         
@@ -368,11 +354,15 @@ def api_status():
                 'type': row['order_type']
             })
             
+        # Optional: Get Meta data
         cur.execute("SELECT data FROM current_state WHERE key = 'meta'")
         meta_row = cur.fetchone()
         meta = json.loads(meta_row['data']) if meta_row else {}
 
-        return jsonify({'history': history, 'meta': meta})
+        return jsonify({
+            'history': history,
+            'meta': meta
+        })
     except Exception as e:
         logger.error(f"API Status Error: {e}")
         return jsonify({'history': [], 'error': str(e)}), 500
@@ -387,46 +377,27 @@ def api_balance_history():
 
 @app.route('/api/symbols_chart')
 def api_symbols_chart():
-    """
-    Returns invested value history for all symbols.
-    Injects 0s where data is missing (gap detection) to show closed positions.
-    """
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT timestamp, symbol, value_usd, pnl_usd FROM symbol_history ORDER BY timestamp ASC")
+    cur.execute("SELECT timestamp, symbol, value_usd, pnl_usd FROM symbol_history ORDER BY id ASC")
     rows = cur.fetchall()
-    
-    # Group by symbol
-    grouped = {}
+    result = {}
     for row in rows:
         sym = row['symbol']
-        if sym not in grouped:
-            grouped[sym] = []
-        grouped[sym].append(row)
-        
-    result = {}
-    for sym, s_rows in grouped.items():
-        # Use 'zero' mode so lines drop to floor when position is closed
-        result[sym] = {
-            'invested': process_series_with_gaps(s_rows, 'value_usd', gap_mode='zero'),
-            'pnl': process_series_with_gaps(s_rows, 'pnl_usd', gap_mode='null')
-        }
-        
+        if sym not in result:
+            result[sym] = {'invested': [], 'pnl': []}
+        result[sym]['invested'].append({'x': row['timestamp'], 'y': row['value_usd']})
+        result[sym]['pnl'].append({'x': row['timestamp'], 'y': row['pnl_usd']})
     return jsonify(result)
 
 @app.route('/api/symbol_detail/<symbol>')
 def api_symbol_detail(symbol):
-    """
-    Returns PnL history for a specific symbol.
-    Injects nulls where data is missing to break the line.
-    """
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT timestamp, pnl_usd FROM symbol_history WHERE symbol = ? ORDER BY timestamp ASC", (symbol,))
+    cur.execute("SELECT timestamp, pnl_usd FROM symbol_history WHERE symbol = ? ORDER BY id ASC", (symbol,))
     pnl_rows = cur.fetchall()
     
-    processed_pnl = process_series_with_gaps(pnl_rows, 'pnl_usd', gap_mode='null')
-
+    # Active orders for the symbol page
     cur.execute("SELECT data FROM current_state WHERE key = 'orders'")
     row = cur.fetchone()
     orders = []
@@ -435,7 +406,7 @@ def api_symbol_detail(symbol):
         orders = [o for o in all_orders if o.get('symbol') == symbol]
         
     return jsonify({
-        'pnl_history': processed_pnl,
+        'pnl_history': [{'x': r['timestamp'], 'y': r['pnl_usd']} for r in pnl_rows],
         'orders': orders
     })
 
