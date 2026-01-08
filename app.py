@@ -1,524 +1,451 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Primate | Observatory</title>
+#!/usr/bin/env python3
+"""
+Company Primate - Clinical Backend
+----------------------------------
+Flask + SQLite + Kraken Futures API
+Targeting Flex Margin Equity specifically for balance tracking.
+Restored full UI routing.
+
+UPDATES:
+- Integrated external 'kraken_futures.py' library.
+- Log Page now shows a cumulative history of all open orders ever found.
+- Language reverted to English.
+- Corrected Order Size calculation (Unfilled + Filled).
+- ADDED: Gap detection for charts. Returns 0 for value and null for PnL when no position exists.
+"""
+
+import os
+import sys
+import time
+import json
+import threading
+import sqlite3
+import logging
+from datetime import datetime
+from typing import Dict, Any, Optional, List
+
+from flask import Flask, render_template, jsonify, g
+
+# --- IMPORT EXTERNAL LIBRARY ---
+try:
+    from kraken_futures import KrakenFuturesApi
+except ImportError:
+    print("CRITICAL: 'kraken_futures.py' not found in directory.")
+    # For local testing without the lib, we might pass, but in prod this is fatal
+    # sys.exit(1) 
+    pass
+
+# Configure Logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger("Primate")
+
+# ------------------------------------------------------------------
+# CONFIGURATION
+# ------------------------------------------------------------------
+DB_FILE = os.getenv('DB_FILE_PATH', 'primate.db')
+FETCH_INTERVAL = 10  # seconds
+GAP_THRESHOLD = 30   # seconds (if gap > this, assume position closed/missing)
+API_KEY = os.getenv("KRAKEN_KEY", "")
+API_SECRET = os.getenv("KRAKEN_SECRET", "")
+CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "contact@companyprimate.com")
+
+if not API_KEY or not API_SECRET:
+    logger.warning("WARNING: KRAKEN_KEY or KRAKEN_SECRET env vars are missing.")
+
+# ------------------------------------------------------------------
+# DATABASE & STORAGE
+# ------------------------------------------------------------------
+def get_db():
+    db = getattr(g, '_database', None)
+    if db is None:
+        db_dir = os.path.dirname(DB_FILE)
+        if db_dir and not os.path.exists(db_dir):
+            try:
+                os.makedirs(db_dir)
+            except OSError as e:
+                logger.error(f"Could not create DB directory {db_dir}: {e}")
+        
+        db = g._database = sqlite3.connect(DB_FILE)
+        db.row_factory = sqlite3.Row
+    return db
+
+def init_db():
+    """Initialize database tables."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
     
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/luxon"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon"></script>
+    # Table for account balance history
+    c.execute('''CREATE TABLE IF NOT EXISTS account_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp REAL,
+        total_equity REAL,
+        total_balance REAL,
+        margin_utilized REAL
+    )''')
+
+    # Table for symbol history (prices/pnl)
+    c.execute('''CREATE TABLE IF NOT EXISTS symbol_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp REAL,
+        symbol TEXT,
+        side TEXT,
+        size REAL,
+        price REAL,
+        mark_price REAL,
+        value_usd REAL,
+        pnl_usd REAL
+    )''')
     
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@100;200;300;400;500;600&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    # Table for order log (cumulative history of open orders)
+    c.execute('''CREATE TABLE IF NOT EXISTS order_log (
+        order_id TEXT PRIMARY KEY,
+        timestamp REAL,
+        symbol TEXT,
+        side TEXT,
+        size REAL,
+        price REAL,
+        order_type TEXT,
+        raw_data TEXT
+    )''')
 
-    <script>
-        tailwind.config = {
-            theme: {
-                extend: {
-                    fontFamily: { 
-                        sans: ['Inter', 'sans-serif'],
-                        mono: ['JetBrains Mono', 'monospace'] 
-                    }
-                }
-            }
-        }
-    </script>
-    <style>
-        body { 
-            background-color: #ffffff; 
-            color: #1a1a1a; 
-            font-family: 'Inter', sans-serif; 
+    # Table for current state (State Store)
+    c.execute('''CREATE TABLE IF NOT EXISTS current_state (
+        key TEXT PRIMARY KEY,
+        data TEXT,
+        updated_at REAL
+    )''')
+    
+    c.execute('CREATE INDEX IF NOT EXISTS idx_sym_hist_ts ON symbol_history(timestamp)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_sym_hist_sym ON symbol_history(symbol)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_order_log_ts ON order_log(timestamp)')
+    conn.commit()
+    conn.close()
+
+def save_snapshot(equity, balance, margin, positions_list, tickers_list):
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        now = time.time()
+
+        c.execute(
+            "INSERT INTO account_history (timestamp, total_equity, total_balance, margin_utilized) VALUES (?, ?, ?, ?)",
+            (now, equity, balance, margin)
+        )
+
+        ticker_map = {t['symbol']: float(t.get('markPrice', 0)) for t in tickers_list if 'symbol' in t}
+
+        for p in positions_list:
+            symbol = p.get('symbol')
+            if not symbol: continue
+
+            side = p.get('side', 'long')
+            size = float(p.get('size', 0))
+            entry_price = float(p.get('price', 0))
+            mark_price = float(ticker_map.get(symbol, entry_price))
+            value_usd = size * mark_price
+            pnl = float(p.get('pnl', 0))
+
+            c.execute('''INSERT INTO symbol_history 
+                (timestamp, symbol, side, size, price, mark_price, value_usd, pnl_usd) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+                (now, symbol, side, size, entry_price, mark_price, value_usd, pnl)
+            )
+
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"DB Write Error (Snapshot): {e}")
+
+def save_found_orders(orders_list):
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        
+        count = 0
+        for o in orders_list:
+            oid = o.get('orderId')
+            if not oid: continue
             
-            /* Background Image Setup */
-            background-image: url('https://i.postimg.cc/QxYJKvBy/1767741251392.png');
-            background-repeat: no-repeat;
-            background-position: top center;
-            background-size: 100% auto;
-            background-attachment: scroll;
-        }
+            order_time_ms = o.get('timestamp')
+            order_timestamp = float(order_time_ms) / 1000 if isinstance(order_time_ms, (int, float)) else time.time()
+            
+            symbol = o.get('tradeable') 
+            side = o.get('direction', 'buy')
+            
+            unfilled = float(o.get('unfilledSize', 0))
+            filled = float(o.get('filledSize', 0))
+            size = unfilled + filled
+            
+            price = float(o.get('limitPrice', 0) or o.get('fillPrice', 0))
+            otype = o.get('orderType', 'limit')
 
-        @media (min-width: 768px) {
-            body {
-                background-size: 600px auto;
-            }
-        }
-        
-        /* Clinical Minimalism */
-        .page-container { max-width: 1000px; margin: 0 auto; padding: 120px 0 40px 0; }
-        
-        .content-pad { padding-left: 20px; padding-right: 20px; }
-        
-        /* Typography */
-        h1, h2, h3 { font-weight: 400; letter-spacing: -0.02em; }
-        
-        /* Brand Styling */
-        .brand-text {
-            font-weight: 200; 
-            font-size: 2.25rem; letter-spacing: 0.4em;
-            text-transform: uppercase; color: #1a1a1a;
-            opacity: 0; 
-        }
-        
-        /* Minimal Links */
-        .clinical-link { 
-            color: #1a1a1a; text-decoration: none; border-bottom: 1px solid #e5e5e5; 
-            padding-bottom: 2px; transition: all 0.2s; cursor: pointer; font-size: 0.9rem;
-        }
-        .clinical-link:hover { border-bottom-color: #1a1a1a; }
-        
-        /* Minimal Table */
-        .clean-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-        .clean-table th { text-align: left; font-weight: 500; color: #888; padding: 12px 0; border-bottom: 1px solid #e5e5e5; }
-        .clean-table td { padding: 12px 0; border-bottom: 1px solid #f0f0f0; font-family: 'JetBrains Mono', monospace; }
-        .clean-table tr:last-child td { border-bottom: none; }
-
-        /* Menu Overlay */
-        .menu-overlay {
-            position: fixed; top: 0; right: 0; width: 250px; height: 100vh; 
-            background: white; border-left: 1px solid #e5e5e5; 
-            transform: translateX(100%); transition: transform 0.3s ease; z-index: 100; padding: 40px;
-        }
-        .menu-overlay.open { transform: translateX(0); }
-        .menu-backdrop {
-            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(255,255,255,0.8); backdrop-filter: blur(2px);
-            opacity: 0; pointer-events: none; transition: opacity 0.3s; z-index: 90;
-        }
-        .menu-backdrop.open { opacity: 1; pointer-events: auto; }
-        
-        /* SPA Transitions */
-        .view-section { display: none; opacity: 0; transition: opacity 0.15s ease-in-out; }
-        .view-section.active { display: block; opacity: 1; }
-    </style>
-</head>
-<body class="antialiased min-h-screen">
-
-    <!-- Header / Logo Click Area -->
-    <div class="fixed top-8 left-1/2 transform -translate-x-1/2 z-50 cursor-pointer select-none" onclick="router.navigate('home')">
-        <h1 class="brand-text">Primate</h1>
-    </div>
-
-    <!-- Burger Menu Icon -->
-    <div class="fixed top-8 right-6 z-50 cursor-pointer p-2 hover:bg-gray-50 rounded-full" onclick="toggleMenu()">
-        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-gray-400 hover:text-black transition"><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle><circle cx="5" cy="12" r="1"></circle></svg>
-    </div>
-
-    <!-- Menu Panel -->
-    <div class="menu-backdrop" id="menu-backdrop" onclick="toggleMenu()"></div>
-    <div class="menu-overlay" id="menu-panel">
-        <div class="flex flex-col space-y-6 mt-12">
-            <a onclick="router.navigate('home'); toggleMenu()" class="clinical-link">Home</a>
-            <a onclick="router.navigate('balance'); toggleMenu()" class="clinical-link">Balance</a>
-            <a onclick="router.navigate('log'); toggleMenu()" class="clinical-link">Log</a>
-            <a onclick="router.navigate('contact'); toggleMenu()" class="clinical-link">Contact</a>
-        </div>
-    </div>
-
-    <div class="page-container">
-
-        <!-- HOME VIEW -->
-        <div id="view-home" class="view-section active">
-            <div class="mb-12">
-                <div class="h-[400px] w-full relative">
-                    <canvas id="homeChart"></canvas>
-                </div>
-            </div>
-
-            <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-6 content-pad" id="symbol-links-container">
-                <div class="text-center text-gray-300 text-sm col-span-full font-mono">Loading assets...</div>
-            </div>
-        </div>
-
-        <!-- SYMBOL DETAIL VIEW -->
-        <div id="view-symbol" class="view-section">
-            <div class="content-pad">
-                <div class="mb-8 cursor-pointer text-gray-400 hover:text-black text-sm w-max" onclick="router.navigate('home')">
-                    &larr; Back
-                </div>
+            c.execute('''INSERT OR IGNORE INTO order_log 
+                (order_id, timestamp, symbol, side, size, price, order_type, raw_data)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)''', 
+                (oid, order_timestamp, symbol, side, size, price, otype, json.dumps(o)))
+            
+            if c.rowcount > 0:
+                count += 1
                 
-                <div class="flex justify-between items-baseline mb-12">
-                    <h1 class="text-4xl font-extralight text-black" id="detail-title">--</h1>
-                    <div class="text-xl font-light font-mono" id="detail-pnl">--</div>
-                </div>
-            </div>
+        conn.commit()
+        conn.close()
+        if count > 0:
+            logger.info(f"New order events archived: {count}")
+            
+    except Exception as e:
+        logger.error(f"DB Write Error (Order Log): {e}")
 
-            <div class="mb-12">
-                <div class="h-[300px] w-full relative">
-                    <canvas id="detailChart"></canvas>
-                </div>
-            </div>
+def update_current_state(key, data):
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute(
+            "INSERT INTO current_state (key, data, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at",
+            (key, json.dumps(data), time.time())
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"DB Update Error: {e}")
 
-            <div class="content-pad">
-                <h3 class="text-xs uppercase text-gray-400 mb-4 tracking-widest">Active Orders</h3>
-                <table class="clean-table">
-                    <thead>
-                        <tr>
-                            <th>Type</th>
-                            <th>Side</th>
-                            <th>Size</th>
-                            <th>Price</th>
-                        </tr>
-                    </thead>
-                    <tbody id="detail-orders-body"></tbody>
-                </table>
-                <div id="detail-orders-empty" class="py-4 text-gray-400 text-sm font-mono hidden">No active orders.</div>
-            </div>
-        </div>
+# ------------------------------------------------------------------
+# BACKGROUND WORKER
+# ------------------------------------------------------------------
+def fetch_worker():
+    logger.info("Starting background fetcher...")
+    try:
+        from kraken_futures import KrakenFuturesApi
+        api = KrakenFuturesApi(API_KEY, API_SECRET)
+    except Exception as e:
+        logger.error(f"Failed to init Kraken API: {e}")
+        return
 
-        <!-- BALANCE VIEW -->
-        <div id="view-balance" class="view-section">
-            <div class="content-pad mb-8 text-sm text-gray-400">Portfolio Value</div>
-            <div class="h-[500px] w-full relative">
-                <canvas id="balanceChart"></canvas>
-            </div>
-        </div>
+    while True:
+        try:
+            start_time = time.time()
+            
+            accounts_resp = api.get_accounts()
+            positions_resp = api.get_open_positions()
+            orders_resp = api.get_open_orders()
+            tickers_resp = api.get_tickers()
+            
+            open_orders = orders_resp.get('openOrders', [])
+            save_found_orders(open_orders)
 
-        <!-- LOG VIEW (History) -->
-        <div id="view-log" class="view-section">
-            <div class="content-pad">
-                <div class="mb-8 text-sm text-gray-400">System Log (Order History)</div>
-                <table class="clean-table">
-                    <thead>
-                        <tr>
-                            <th>Time</th>
-                            <th>Symbol</th>
-                            <th>Side</th>
-                            <th>Size</th>
-                            <th>Price</th>
-                        </tr>
-                    </thead>
-                    <tbody id="log-table-body"></tbody>
-                </table>
-                <div id="log-empty" class="py-12 text-center text-gray-400 font-mono hidden">No events found.</div>
-            </div>
-        </div>
+            tickers = tickers_resp.get('tickers', [])
+            positions = positions_resp.get('openPositions', [])
 
-        <!-- CONTACT VIEW -->
-        <div id="view-contact" class="view-section">
-            <div class="flex flex-col items-center justify-center h-[60vh] content-pad">
-                <div class="text-sm text-gray-400 mb-2">Contact</div>
-                <div class="text-xl font-light font-mono border-b border-gray-200 pb-1" id="contact-email">
-                    Loading...
-                </div>
-            </div>
-        </div>
+            mark_map = {t['symbol']: float(t.get('markPrice', 0)) for t in tickers if 'symbol' in t}
 
-    </div>
+            for p in positions:
+                symbol = p.get('symbol')
+                if not symbol: continue
+                try:
+                    entry_price = float(p.get('price', 0))
+                    size = float(p.get('size', 0))
+                    side = p.get('side', 'long')
+                    mark_price = mark_map.get(symbol, entry_price)
 
-    <script>
-        const fmtUSD = (num) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(num);
+                    if side == 'long':
+                        calculated_pnl = (mark_price - entry_price) * size
+                    else:
+                        calculated_pnl = (entry_price - mark_price) * size
+                    
+                    p['pnl'] = calculated_pnl
+                except (ValueError, TypeError):
+                    p['pnl'] = 0.0
 
-        // CONFIG: Stepped Lines + No Scales
-        Chart.defaults.font.family = "'JetBrains Mono', monospace";
-        Chart.defaults.font.size = 11;
-        Chart.defaults.color = '#888';
-        Chart.defaults.plugins.tooltip.backgroundColor = 'rgba(255, 255, 255, 0.95)';
-        Chart.defaults.plugins.tooltip.titleColor = '#000';
-        Chart.defaults.plugins.tooltip.bodyColor = '#444';
-        Chart.defaults.plugins.tooltip.borderColor = '#e5e5e5';
-        Chart.defaults.plugins.tooltip.borderWidth = 1;
-        Chart.defaults.plugins.tooltip.padding = 10;
-        Chart.defaults.plugins.tooltip.displayColors = true; 
+            total_equity = 0.0
+            total_balance = 0.0
+            margin = 0.0
+            
+            res = accounts_resp.get('accounts', {})
+            
+            if 'flex' in res:
+                flex_acc = res['flex']
+                total_equity = float(flex_acc.get('marginEquity', 0))
+                total_balance = float(flex_acc.get('balance', 0))
+                aux = flex_acc.get('auxiliary', {})
+                margin = float(flex_acc.get('marginUsed', aux.get('usedMargin', 0)))
+            else:
+                for acc_key, acc_val in res.items():
+                    if isinstance(acc_val, dict):
+                        total_equity += float(acc_val.get('marginEquity', 0))
+                        total_balance += float(acc_val.get('balance', 0))
+                        margin += float(acc_val.get('marginUsed', acc_val.get('auxiliary', {}).get('usedMargin', 0)))
+
+            save_snapshot(total_equity, total_balance, margin, positions, tickers)
+            
+            update_current_state('positions', positions)
+            update_current_state('orders', open_orders)
+            update_current_state('tickers', tickers)
+            update_current_state('meta', {
+                'last_update': time.time(),
+                'equity': total_equity,
+                'balance': total_balance,
+                'margin': margin
+            })
+
+        except Exception as e:
+            logger.error(f"Error in fetch loop: {e}", exc_info=True)
+
+        elapsed = time.time() - start_time
+        time.sleep(max(1, FETCH_INTERVAL - elapsed))
+
+# ------------------------------------------------------------------
+# HELPER: GAP FILLING
+# ------------------------------------------------------------------
+def process_series_with_gaps(rows, value_key, gap_mode='zero'):
+    """
+    Injects gap points into a time series.
+    gap_mode: 'zero' (for value charts) -> drops to 0
+              'null' (for pnl charts) -> breaks line with None
+    """
+    if not rows:
+        return []
+
+    data = []
+    prev_ts = None
+    
+    for r in rows:
+        curr_ts = r['timestamp']
+        val = r[value_key]
         
-        // --- INTERACTION FIX ---
-        // Ensure that hover/interaction works for ALL datasets at the same Index
-        // intersect: false ensures you don't have to be exactly on the line
-        const minimalChartOptions = {
-            responsive: true,
-            maintainAspectRatio: false,
-            layout: { padding: 0 }, 
-            interaction: { 
-                mode: 'index', 
-                intersect: false 
-            },
-            hover: {
-                mode: 'index',
-                intersect: false
-            },
-            scales: {
-                x: { 
-                    type: 'time', 
-                    time: { unit: 'minute' }, 
-                    display: false, 
-                    grid: { display: false },
-                    offset: false,
-                    bounds: 'data'
-                },
-                y: { 
-                    display: false, 
-                    grid: { display: false },
-                    offset: false 
-                }
-            },
-            plugins: { legend: { display: false } },
-            elements: {
-                point: { radius: 0, hitRadius: 40, hoverRadius: 4 }, 
-                line: { borderWidth: 2 } 
-            }
-        };
+        if prev_ts is not None:
+            # If gap > threshold, we missed a snapshot or position was closed
+            if (curr_ts - prev_ts) > GAP_THRESHOLD:
+                # Insert gap point just after previous
+                fill_val = 0 if gap_mode == 'zero' else None
+                data.append({'x': prev_ts + 1, 'y': fill_val})
+                # If zero mode, we also want it to be zero just before current
+                if gap_mode == 'zero':
+                    data.append({'x': curr_ts - 1, 'y': 0})
+        
+        data.append({'x': curr_ts, 'y': val})
+        prev_ts = curr_ts
+        
+    return data
 
-        const chartInstances = { home: null, balance: null, detail: null };
+# ------------------------------------------------------------------
+# FLASK WEB APP
+# ------------------------------------------------------------------
+app = Flask(__name__)
 
-        function toggleMenu() {
-            document.getElementById('menu-panel').classList.toggle('open');
-            document.getElementById('menu-backdrop').classList.toggle('open');
+with app.app_context():
+    init_db()
+
+@app.teardown_appcontext
+def close_connection(exception):
+    db = getattr(g, '_database', None)
+    if db is not None:
+        db.close()
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route('/api/contact')
+def api_contact():
+    return jsonify({'email': CONTACT_EMAIL})
+
+@app.route('/api/status')
+def api_status():
+    try:
+        conn = get_db()
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        
+        cur.execute("SELECT * FROM order_log ORDER BY timestamp DESC LIMIT 100")
+        rows = cur.fetchall()
+        
+        history = []
+        for row in rows:
+            history.append({
+                'order_id': row['order_id'],
+                'timestamp': row['timestamp'],
+                'symbol': row['symbol'],
+                'side': row['side'],
+                'size': row['size'],
+                'price': row['price'],
+                'type': row['order_type']
+            })
+            
+        cur.execute("SELECT data FROM current_state WHERE key = 'meta'")
+        meta_row = cur.fetchone()
+        meta = json.loads(meta_row['data']) if meta_row else {}
+
+        return jsonify({'history': history, 'meta': meta})
+    except Exception as e:
+        logger.error(f"API Status Error: {e}")
+        return jsonify({'history': [], 'error': str(e)}), 500
+
+@app.route('/api/balance_history')
+def api_balance_history():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT timestamp, total_equity FROM account_history ORDER BY id ASC")
+    rows = cur.fetchall()
+    return jsonify([{'time': r['timestamp'], 'equity': r['total_equity']} for r in rows])
+
+@app.route('/api/symbols_chart')
+def api_symbols_chart():
+    """
+    Returns invested value history for all symbols.
+    Injects 0s where data is missing (gap detection) to show closed positions.
+    """
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT timestamp, symbol, value_usd, pnl_usd FROM symbol_history ORDER BY timestamp ASC")
+    rows = cur.fetchall()
+    
+    # Group by symbol
+    grouped = {}
+    for row in rows:
+        sym = row['symbol']
+        if sym not in grouped:
+            grouped[sym] = []
+        grouped[sym].append(row)
+        
+    result = {}
+    for sym, s_rows in grouped.items():
+        # Use 'zero' mode so lines drop to floor when position is closed
+        result[sym] = {
+            'invested': process_series_with_gaps(s_rows, 'value_usd', gap_mode='zero'),
+            'pnl': process_series_with_gaps(s_rows, 'pnl_usd', gap_mode='null')
         }
+        
+    return jsonify(result)
 
-        const router = {
-            navigate: (page, param = null) => {
-                document.querySelectorAll('.view-section').forEach(el => {
-                    el.classList.remove('active');
-                    setTimeout(() => { if(!el.classList.contains('active')) el.style.display = 'none'; }, 150);
-                });
+@app.route('/api/symbol_detail/<symbol>')
+def api_symbol_detail(symbol):
+    """
+    Returns PnL history for a specific symbol.
+    Injects nulls where data is missing to break the line.
+    """
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT timestamp, pnl_usd FROM symbol_history WHERE symbol = ? ORDER BY timestamp ASC", (symbol,))
+    pnl_rows = cur.fetchall()
+    
+    processed_pnl = process_series_with_gaps(pnl_rows, 'pnl_usd', gap_mode='null')
 
-                const target = document.getElementById(page === 'symbol' ? 'view-symbol' : `view-${page}`);
-                target.style.display = 'block';
-                setTimeout(() => target.classList.add('active'), 10);
+    cur.execute("SELECT data FROM current_state WHERE key = 'orders'")
+    row = cur.fetchone()
+    orders = []
+    if row:
+        all_orders = json.loads(row['data'])
+        orders = [o for o in all_orders if o.get('symbol') == symbol]
+        
+    return jsonify({
+        'pnl_history': processed_pnl,
+        'orders': orders
+    })
 
-                if (page === 'home') loadHomeData();
-                if (page === 'balance') loadBalanceData();
-                if (page === 'log') loadLogData();
-                if (page === 'contact') loadContactData();
-                if (page === 'symbol' && param) loadSymbolData(param);
-            }
-        };
-
-        async function loadHomeData() {
-            // Fallback mock data
-            let chartData;
-            try {
-                const chartRes = await fetch('/api/symbols_chart');
-                chartData = await chartRes.json();
-            } catch (e) {
-                chartData = {
-                    'BTC': { invested: Array.from({length: 20}, (_, i) => ({x: Date.now()/1000 - (20-i)*3600, y: 30000 + Math.random()*1000})) },
-                    'ETH': { invested: Array.from({length: 20}, (_, i) => ({x: Date.now()/1000 - (20-i)*3600, y: 2000 + Math.random()*100})) }
-                };
-            }
-            
-            const symbolsArray = Object.keys(chartData).map(sym => {
-                const investedData = chartData[sym].invested || [];
-                // Calculate Max Value to sort by "Highest Peak"
-                let maxVal = 0;
-                let lastVal = 0;
-                
-                // If investedData has nulls, we filter them for math, but keep them for chart
-                const validPoints = investedData.filter(d => d.y !== null);
-                if (validPoints.length > 0) {
-                    lastVal = validPoints[validPoints.length - 1].y;
-                    maxVal = Math.max(...validPoints.map(d => d.y));
-                }
-
-                return {
-                    sym,
-                    lastVal,
-                    maxVal,
-                    invested: investedData.map(pt => ({x: pt.x * 1000, y: pt.y}))
-                };
-            });
-            
-            // Sort by MAX value (Descending)
-            symbolsArray.sort((a, b) => b.maxVal - a.maxVal);
-
-            // High Contrast Professional Palette
-            const colorPalette = [
-                '#2563eb', // Blue
-                '#dc2626', // Red
-                '#16a34a', // Green
-                '#9333ea', // Purple
-                '#d97706', // Amber
-                '#0891b2', // Cyan
-                '#db2777', // Pink
-                '#4f46e5', // Indigo
-                '#ca8a04', // Yellow-Gold
-                '#000000'  // Black
-            ];
-
-            const grid = document.getElementById('symbol-links-container');
-            if (symbolsArray.length === 0) {
-                grid.innerHTML = '<div class="col-span-full text-center text-gray-300 text-sm font-mono">No data available</div>';
-            } else {
-                grid.innerHTML = symbolsArray.map((item, idx) => {
-                    const color = colorPalette[idx % colorPalette.length];
-                    return `
-                    <div onclick="router.navigate('symbol', '${item.sym}')" 
-                         class="text-center py-4 border border-transparent hover:border-gray-100 rounded cursor-pointer transition text-sm hover:text-black font-medium"
-                         style="color: ${color}">
-                        <div>${item.sym}</div>
-                    </div>
-                `}).join('');
-            }
-
-            const datasets = symbolsArray.map((item, idx) => {
-                return {
-                    label: item.sym,
-                    data: item.invested,
-                    borderColor: colorPalette[idx % colorPalette.length], 
-                    borderWidth: 2,
-                    stepped: true,
-                    fill: false,  // Ensure no fill blocks interaction
-                    backgroundColor: 'transparent',
-                    pointHoverRadius: 6 // slightly larger hover area
-                };
-            });
-
-            if (chartInstances.home) chartInstances.home.destroy();
-            chartInstances.home = new Chart(document.getElementById('homeChart'), {
-                type: 'line',
-                data: { datasets },
-                options: minimalChartOptions
-            });
-        }
-
-        async function loadBalanceData() {
-            let points;
-            try {
-                const res = await fetch('/api/balance_history');
-                const data = await res.json();
-                points = data.map(d => ({ x: d.time * 1000, y: d.equity }));
-            } catch (e) {
-                points = Array.from({length: 20}, (_, i) => ({x: Date.now() - (20-i)*3600000, y: 50000 + i*100 + Math.random()*500}));
-            }
-
-            if (chartInstances.balance) chartInstances.balance.destroy();
-            chartInstances.balance = new Chart(document.getElementById('balanceChart'), {
-                type: 'line',
-                data: {
-                    datasets: [{
-                        data: points,
-                        borderColor: '#000000',
-                        borderWidth: 2,
-                        fill: 'start',      
-                        backgroundColor: '#ffffff', 
-                        stepped: true
-                    }]
-                },
-                options: minimalChartOptions
-            });
-        }
-
-        async function loadLogData() {
-            let history = [];
-            try {
-                const res = await fetch('/api/status');
-                const data = await res.json();
-                history = data.history || [];
-            } catch (e) {
-                history = [];
-            }
-            
-            const tbody = document.getElementById('log-table-body');
-            
-            if (history.length > 0) {
-                tbody.innerHTML = history.map(item => {
-                    const time = item.timestamp * 1000;
-                    const type = item.type || 'LIMIT';
-                    const side = item.side ? item.side.toLowerCase() : '--';
-                    const symbol = item.symbol || '--';
-                    const size = item.size || '--';
-                    const price = item.price || 'MKT';
-                    const sideClass = side === 'buy' ? 'text-green-700' : (side === 'sell' ? 'text-red-700' : 'text-gray-600');
-                    
-                    return `
-                    <tr>
-                        <td class="text-gray-500 text-xs font-mono">${new Date(time).toLocaleString()}</td>
-                        <td>
-                            <b>${symbol}</b>
-                            <span class="text-xs text-gray-400 ml-1 uppercase border border-gray-100 px-1 rounded">${type}</span>
-                        </td>
-                        <td class="${sideClass} uppercase font-medium text-xs">${side}</td>
-                        <td class="text-gray-700 font-mono">${size}</td>
-                        <td class="text-gray-700 font-mono text-xs">${price !== 'MKT' ? '$' + price : price}</td>
-                    </tr>
-                `;
-                }).join('');
-                document.getElementById('log-empty').classList.add('hidden');
-            } else {
-                tbody.innerHTML = '';
-                document.getElementById('log-empty').classList.remove('hidden');
-                document.getElementById('log-empty').innerText = "No history found.";
-            }
-        }
-
-        async function loadSymbolData(symbol) {
-            document.getElementById('detail-title').innerText = symbol;
-            
-            let history = [];
-            let orders = [];
-            
-            try {
-                const detailRes = await fetch(`/api/symbol_detail/${symbol}`);
-                const detail = await detailRes.json();
-                history = detail.pnl_history || [];
-                orders = detail.orders || [];
-            } catch (e) {
-                history = Array.from({length: 10}, (_, i) => ({x: Date.now()/1000 - i*3600, y: Math.random() * 100 - 50}));
-            }
-            
-            const lastPnlValue = history.length > 0 ? history[history.length - 1].y : 0;
-            const pnlEl = document.getElementById('detail-pnl');
-            // Check for null or undefined pnl
-            if (lastPnlValue !== null && lastPnlValue !== undefined) {
-                pnlEl.innerText = (lastPnlValue >= 0 ? '+' : '') + fmtUSD(lastPnlValue);
-                pnlEl.style.color = lastPnlValue >= 0 ? '#1a1a1a' : '#dc2626'; 
-            } else {
-                pnlEl.innerText = "--";
-                pnlEl.style.color = "#888";
-            }
-
-            if (chartInstances.detail) chartInstances.detail.destroy();
-            chartInstances.detail = new Chart(document.getElementById('detailChart'), {
-                type: 'line',
-                data: {
-                    datasets: [{
-                        data: history.map(d => ({ x: d.x * 1000, y: d.y })),
-                        borderColor: '#000000',
-                        borderWidth: 2,
-                        fill: 'start',
-                        backgroundColor: '#ffffff', 
-                        stepped: true,
-                        spanGaps: false // IMPORTANT: Do NOT connect lines over nulls
-                    }]
-                },
-                options: minimalChartOptions
-            });
-
-            const ordBody = document.getElementById('detail-orders-body');
-            if (orders.length > 0) {
-                ordBody.innerHTML = orders.map(o => {
-                    const filled = parseFloat(o.filledSize) || 0;
-                    const unfilled = parseFloat(o.unfilledSize) || 0;
-                    const totalSize = filled + unfilled;
-                    
-                    return `
-                    <tr>
-                        <td class="uppercase text-xs tracking-wider">${o.orderType}</td>
-                        <td class="${o.side === 'buy' ? 'text-green-700' : 'text-red-700'}">${o.side}</td>
-                        <td class="font-mono">${totalSize}</td>
-                        <td class="font-mono">$${o.limitPrice || o.stopPrice || 'MKT'}</td>
-                    </tr>
-                `;
-                }).join('');
-                document.getElementById('detail-orders-empty').classList.add('hidden');
-            } else {
-                ordBody.innerHTML = '';
-                document.getElementById('detail-orders-empty').classList.remove('hidden');
-            }
-        }
-
-        async function loadContactData() {
-            try {
-                const res = await fetch('/api/contact');
-                const data = await res.json();
-                document.getElementById('contact-email').innerText = data.email || "Loading failed";
-            } catch (e) {
-                document.getElementById('contact-email').innerText = "contact@primate.obs";
-            }
-        }
-
-        router.navigate('home');
-    </script>
-</body>
-</html>
+if __name__ == '__main__':
+    t = threading.Thread(target=fetch_worker, daemon=True)
+    t.start()
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
