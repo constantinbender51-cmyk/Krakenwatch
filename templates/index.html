@@ -220,13 +220,23 @@
         Chart.defaults.plugins.tooltip.borderColor = '#e5e5e5';
         Chart.defaults.plugins.tooltip.borderWidth = 1;
         Chart.defaults.plugins.tooltip.padding = 10;
-        Chart.defaults.plugins.tooltip.displayColors = false; 
+        Chart.defaults.plugins.tooltip.displayColors = true; 
         
+        // --- INTERACTION FIX ---
+        // Ensure that hover/interaction works for ALL datasets at the same Index
+        // intersect: false ensures you don't have to be exactly on the line
         const minimalChartOptions = {
             responsive: true,
             maintainAspectRatio: false,
             layout: { padding: 0 }, 
-            interaction: { intersect: false, mode: 'index' },
+            interaction: { 
+                mode: 'index', 
+                intersect: false 
+            },
+            hover: {
+                mode: 'index',
+                intersect: false
+            },
             scales: {
                 x: { 
                     type: 'time', 
@@ -290,11 +300,15 @@
             
             const symbolsArray = Object.keys(chartData).map(sym => {
                 const investedData = chartData[sym].invested || [];
+                // Calculate Max Value to sort by "Highest Peak"
                 let maxVal = 0;
                 let lastVal = 0;
-                if (investedData.length > 0) {
-                    lastVal = investedData[investedData.length - 1].y;
-                    maxVal = Math.max(...investedData.map(d => d.y));
+                
+                // If investedData has nulls, we filter them for math, but keep them for chart
+                const validPoints = investedData.filter(d => d.y !== null);
+                if (validPoints.length > 0) {
+                    lastVal = validPoints[validPoints.length - 1].y;
+                    maxVal = Math.max(...validPoints.map(d => d.y));
                 }
 
                 return {
@@ -308,50 +322,45 @@
             // Sort by MAX value (Descending)
             symbolsArray.sort((a, b) => b.maxVal - a.maxVal);
 
-            const grid = document.getElementById('symbol-links-container');
-            if (symbolsArray.length === 0) {
-                grid.innerHTML = '<div class="col-span-full text-center text-gray-300 text-sm font-mono">No data available</div>';
-            } else {
-                // We'll also apply colors to the legend text
-                const legendColors = [
-                    '#000000', '#2563eb', '#dc2626', '#16a34a', '#9333ea', 
-                    '#d97706', '#0891b2', '#4b5563', '#be123c', '#0f766e'
-                ];
-                
-                grid.innerHTML = symbolsArray.map((item, idx) => {
-                    const color = legendColors[idx % legendColors.length];
-                    return `
-                    <div onclick="router.navigate('symbol', '${item.sym}')" 
-                         class="text-center py-4 border border-transparent hover:border-gray-100 rounded cursor-pointer transition text-sm hover:text-black"
-                         style="color: ${color}">
-                        <div class="font-medium">${item.sym}</div>
-                    </div>
-                `}).join('');
-            }
-            
-            // Palette for the chart lines
-            const lineColors = [
-                '#000000', // Black
+            // High Contrast Professional Palette
+            const colorPalette = [
                 '#2563eb', // Blue
                 '#dc2626', // Red
                 '#16a34a', // Green
                 '#9333ea', // Purple
-                '#d97706', // Orange
-                '#0891b2', // Cyan/Teal
-                '#4b5563', // Gray
-                '#be123c', // Rose
-                '#0f766e'  // Dark Teal
+                '#d97706', // Amber
+                '#0891b2', // Cyan
+                '#db2777', // Pink
+                '#4f46e5', // Indigo
+                '#ca8a04', // Yellow-Gold
+                '#000000'  // Black
             ];
+
+            const grid = document.getElementById('symbol-links-container');
+            if (symbolsArray.length === 0) {
+                grid.innerHTML = '<div class="col-span-full text-center text-gray-300 text-sm font-mono">No data available</div>';
+            } else {
+                grid.innerHTML = symbolsArray.map((item, idx) => {
+                    const color = colorPalette[idx % colorPalette.length];
+                    return `
+                    <div onclick="router.navigate('symbol', '${item.sym}')" 
+                         class="text-center py-4 border border-transparent hover:border-gray-100 rounded cursor-pointer transition text-sm hover:text-black font-medium"
+                         style="color: ${color}">
+                        <div>${item.sym}</div>
+                    </div>
+                `}).join('');
+            }
 
             const datasets = symbolsArray.map((item, idx) => {
                 return {
                     label: item.sym,
                     data: item.invested,
-                    borderColor: lineColors[idx % lineColors.length], // Cycle through colors
+                    borderColor: colorPalette[idx % colorPalette.length], 
                     borderWidth: 2,
                     stepped: true,
-                    fill: false,
-                    backgroundColor: 'transparent'
+                    fill: false,  // Ensure no fill blocks interaction
+                    backgroundColor: 'transparent',
+                    pointHoverRadius: 6 // slightly larger hover area
                 };
             });
 
@@ -450,8 +459,14 @@
             
             const lastPnlValue = history.length > 0 ? history[history.length - 1].y : 0;
             const pnlEl = document.getElementById('detail-pnl');
-            pnlEl.innerText = (lastPnlValue >= 0 ? '+' : '') + fmtUSD(lastPnlValue);
-            pnlEl.style.color = lastPnlValue >= 0 ? '#1a1a1a' : '#000000'; 
+            // Check for null or undefined pnl
+            if (lastPnlValue !== null && lastPnlValue !== undefined) {
+                pnlEl.innerText = (lastPnlValue >= 0 ? '+' : '') + fmtUSD(lastPnlValue);
+                pnlEl.style.color = lastPnlValue >= 0 ? '#1a1a1a' : '#dc2626'; 
+            } else {
+                pnlEl.innerText = "--";
+                pnlEl.style.color = "#888";
+            }
 
             if (chartInstances.detail) chartInstances.detail.destroy();
             chartInstances.detail = new Chart(document.getElementById('detailChart'), {
@@ -463,7 +478,8 @@
                         borderWidth: 2,
                         fill: 'start',
                         backgroundColor: '#ffffff', 
-                        stepped: true
+                        stepped: true,
+                        spanGaps: false // IMPORTANT: Do NOT connect lines over nulls
                     }]
                 },
                 options: minimalChartOptions
@@ -506,5 +522,3 @@
     </script>
 </body>
 </html>
-
-
