@@ -17,7 +17,7 @@
             font-family: 'Inter', sans-serif;
             background-color: #ffffff;
             color: #1a1a1a;
-            height: 100vh;
+            height: 100vh; /* Ensure this is only in CSS */
             overflow: hidden;
         }
         
@@ -67,8 +67,8 @@
             transform: translateX(-50%);
             font-family: 'JetBrains Mono', monospace;
             font-size: 2rem;
-            color: #000000; /* Explicit Black */
-            opacity: 1;     /* Full Opacity */
+            color: #000000;
+            opacity: 1;
             font-weight: 500;
             pointer-events: none;
             z-index: 0;
@@ -202,7 +202,7 @@
             const datasets = [{
                 data: dataPoints,
                 borderColor: color,
-                borderWidth: 4, // THICKER LINE
+                borderWidth: 4, 
                 pointRadius: 0,
                 tension: 0.1,
                 fill: false
@@ -211,11 +211,9 @@
             if (isComposite && dataPoints.length > 0) {
                 const startX = dataPoints[0].x;
                 const endX = dataPoints[dataPoints.length-1].x;
-                
                 const lineStyle = {
                     borderColor: '#000000', borderWidth: 2, pointRadius: 0, borderDash: [] 
                 };
-                
                 datasets.push({ ...lineStyle, data: [{x: startX, y: 5}, {x: endX, y: 5}] });
                 datasets.push({ ...lineStyle, data: [{x: startX, y: -5}, {x: endX, y: -5}] });
             }
@@ -247,9 +245,9 @@
                 data: {
                     datasets: [{
                         data: dataPoints.map(d => ({x: d.timestamp * 1000, y: d.qty})),
-                        backgroundColor: color,
+                        backgroundColor: '#93c5fd', // Fixed Light Blue
                         barThickness: 'flex',
-                        maxBarThickness: 10 // Slightly thicker bars for weight
+                        maxBarThickness: 2 // Thin lines
                     }]
                 },
                 options: {
@@ -264,7 +262,7 @@
                             ticks: { display: false }, 
                             grid: {
                                 color: (ctx) => ctx.tick.value === 0 ? '#000000' : 'transparent',
-                                lineWidth: 2, // Thicker Zero Line
+                                lineWidth: 2,
                                 drawBorder: false,
                                 drawTicks: false
                             }
