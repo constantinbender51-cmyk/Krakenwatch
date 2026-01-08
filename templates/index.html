@@ -91,6 +91,10 @@
         /* SPA Transitions */
         .view-section { display: none; opacity: 0; transition: opacity 0.15s ease-in-out; }
         .view-section.active { display: block; opacity: 1; }
+        
+        /* Chart Hover Group */
+        .chart-row:hover .row-title { text-decoration: underline; color: black; }
+        .chart-row:hover .row-bg { background-color: #fafafa; }
     </style>
 </head>
 <body class="antialiased min-h-screen">
@@ -116,8 +120,8 @@
     <div class="page-container">
 
         <div id="view-home" class="view-section active">
-            <div id="home-charts-grid" class="grid grid-cols-1 md:grid-cols-2 gap-12 content-pad mb-12">
-                <div class="text-center text-gray-300 text-sm font-mono col-span-full mt-12">Initializing...</div>
+            <div id="home-assets-list" class="flex flex-col gap-12">
+                <div class="text-center text-gray-300 text-sm font-mono mt-12">Loading observatory...</div>
             </div>
         </div>
 
@@ -242,13 +246,15 @@
             },
             elements: {
                 point: { radius: 0, hitRadius: 20, hoverRadius: 6 }, 
-                line: { borderWidth: 2, tension: 0.3 } 
+                line: { borderWidth: 2, tension: 0.3 }
             }
         };
 
-        // GLOBAL: Keep track of multiple home charts to destroy them on reload
-        let homeChartInstances = [];
-        const chartInstances = { balance: null, detail: null };
+        const chartInstances = { 
+            home: [], // Changed to Array for multiple charts
+            balance: null, 
+            detail: null 
+        };
         
         // Palette for the chart lines
         const colorPalette = [
@@ -289,89 +295,108 @@
         };
 
         async function loadHomeData() {
-            // Clean up old charts
-            homeChartInstances.forEach(c => c.destroy());
-            homeChartInstances = [];
-
-            const grid = document.getElementById('home-charts-grid');
-            grid.innerHTML = '<div class="col-span-full text-center text-gray-300 text-sm font-mono mt-8">Loading data...</div>';
+            // Cleanup existing charts
+            if (chartInstances.home.length > 0) {
+                chartInstances.home.forEach(c => c.destroy());
+                chartInstances.home = [];
+            }
 
             let chartData;
             try {
                 const chartRes = await fetch('/api/symbols_chart');
                 chartData = await chartRes.json();
             } catch (e) {
-                // Mock Data for Fallback
+                // Mock fallback
                 chartData = {
                     'BTC': { invested: Array.from({length: 20}, (_, i) => ({x: Date.now()/1000 - (20-i)*3600, y: 30000 + Math.random()*1000})) },
                     'ETH': { invested: Array.from({length: 20}, (_, i) => ({x: Date.now()/1000 - (20-i)*3600, y: 2000 + Math.random()*100})) }
                 };
             }
             
-            // Empty grid before population
-            grid.innerHTML = '';
+            const symbolsArray = Object.keys(chartData).map(sym => {
+                const investedData = chartData[sym].invested || [];
+                // Calculate stats
+                let maxVal = 0;
+                let lastVal = 0;
+                const validPoints = investedData.filter(d => d.y !== null);
+                if (validPoints.length > 0) {
+                    lastVal = validPoints[validPoints.length - 1].y;
+                    maxVal = Math.max(...validPoints.map(d => d.y));
+                }
+                return {
+                    sym,
+                    lastVal,
+                    maxVal,
+                    invested: investedData.map(pt => ({x: pt.x * 1000, y: pt.y}))
+                };
+            });
 
-            const symbols = Object.keys(chartData);
-            if (symbols.length === 0) {
-                grid.innerHTML = '<div class="col-span-full text-center text-gray-300 text-sm font-mono mt-8">No assets found.</div>';
+            // Sort by Max Value
+            symbolsArray.sort((a, b) => b.maxVal - a.maxVal);
+
+            const container = document.getElementById('home-assets-list');
+            
+            if (symbolsArray.length === 0) {
+                container.innerHTML = '<div class="text-center text-gray-300 text-sm font-mono mt-12">No active assets found.</div>';
                 return;
             }
 
-            symbols.forEach((sym, idx) => {
-                const investedData = chartData[sym].invested || [];
-                // Sort data just in case
-                investedData.sort((a, b) => a.x - b.x);
-                
-                const points = investedData.map(pt => ({x: pt.x * 1000, y: pt.y}));
-                const color = colorPalette[idx % colorPalette.length];
+            container.innerHTML = ''; // Clear loading
 
-                // Create Container for this specific chart
-                const container = document.createElement('div');
-                container.className = "flex flex-col mb-4";
+            symbolsArray.forEach((item, idx) => {
+                const color = colorPalette[idx % colorPalette.length];
+                const chartId = `chart-${item.sym}`;
                 
-                // Create unique ID
-                const canvasId = `chart-home-${sym}`;
-                
-                container.innerHTML = `
-                    <div class="flex justify-between items-baseline mb-2 border-b border-gray-100 pb-1 cursor-pointer hover:opacity-70 transition" onclick="router.navigate('symbol', '${sym}')">
-                        <h3 class="text-xl font-light text-black tracking-wide">${sym}</h3>
-                        <span class="text-xs text-gray-400 font-mono">DETAIL &rarr;</span>
-                    </div>
-                    <div class="h-[200px] w-full relative">
-                        <canvas id="${canvasId}"></canvas>
+                // HTML Layout for one asset row
+                const rowHtml = `
+                    <div class="chart-row relative w-full cursor-pointer group transition-colors duration-200 rounded-sm" onclick="router.navigate('symbol', '${item.sym}')">
+                        <div class="row-bg absolute inset-0 -mx-4 rounded-sm transition-colors duration-200 z-0"></div>
+                        
+                        <div class="relative z-10 flex flex-col h-[200px] w-full">
+                            <div class="flex justify-between items-baseline mb-2 px-1 pt-2">
+                                <div class="row-title text-2xl font-light text-gray-800 transition-colors">${item.sym}</div>
+                                <div class="text-sm font-mono text-gray-500">${fmtUSD(item.lastVal)}</div>
+                            </div>
+                            
+                            <div class="relative flex-grow w-full">
+                                <canvas id="${chartId}"></canvas>
+                            </div>
+                        </div>
                     </div>
                 `;
                 
-                grid.appendChild(container);
+                // Append string as HTML
+                const tempDiv = document.createElement('div');
+                tempDiv.innerHTML = rowHtml;
+                container.appendChild(tempDiv.firstElementChild);
 
-                // Initialize Chart
-                const ctx = document.getElementById(canvasId).getContext('2d');
+                // Init Chart
+                const ctx = document.getElementById(chartId).getContext('2d');
                 
-                // On-click event specifically for this chart
-                const specificOptions = JSON.parse(JSON.stringify(minimalChartOptions));
-                specificOptions.onClick = () => router.navigate('symbol', sym);
+                // Create gradient for fill
+                const gradient = ctx.createLinearGradient(0, 0, 0, 200);
+                // Very subtle opacity for the fill to keep it clean
+                gradient.addColorStop(0, 'rgba(255,255,255, 0.8)'); 
+                gradient.addColorStop(1, 'rgba(255,255,255, 1)'); 
 
-                const newChart = new Chart(ctx, {
+                const chart = new Chart(ctx, {
                     type: 'line',
                     data: {
                         datasets: [{
-                            label: sym,
-                            data: points,
+                            data: item.invested,
                             borderColor: color,
                             borderWidth: 2,
                             tension: 0.3,
-                            // White fill to cover background image (Silhouette effect)
-                            fill: 'start', 
-                            backgroundColor: '#ffffff',
+                            fill: 'start', // Fill area below
+                            backgroundColor: '#ffffff', // White opaque fill to create the "mountain" effect against lines behind, though here they are separate
                             pointHoverRadius: 6,
-                            pointHoverBackgroundColor: color,
-                            pointHoverBorderColor: '#fff'
+                            pointRadius: 0
                         }]
                     },
-                    options: specificOptions
+                    options: minimalChartOptions
                 });
                 
-                homeChartInstances.push(newChart);
+                chartInstances.home.push(chart);
             });
         }
 
@@ -393,7 +418,7 @@
                         data: points,
                         borderColor: '#000000',
                         borderWidth: 2,
-                        tension: 0.3, // Consistent styling
+                        tension: 0.3,
                         fill: 'start',      
                         backgroundColor: '#ffffff'
                     }]
@@ -462,7 +487,7 @@
             
             const lastPnlValue = history.length > 0 ? history[history.length - 1].y : 0;
             const pnlEl = document.getElementById('detail-pnl');
-            // Check for null or undefined pnl
+            
             if (lastPnlValue !== null && lastPnlValue !== undefined) {
                 pnlEl.innerText = (lastPnlValue >= 0 ? '+' : '') + fmtUSD(lastPnlValue);
                 pnlEl.style.color = lastPnlValue >= 0 ? '#1a1a1a' : '#dc2626'; 
@@ -482,7 +507,7 @@
                         fill: 'start',
                         backgroundColor: '#ffffff', 
                         tension: 0.3,
-                        spanGaps: false // IMPORTANT: Do NOT connect lines over nulls
+                        spanGaps: false
                     }]
                 },
                 options: minimalChartOptions
