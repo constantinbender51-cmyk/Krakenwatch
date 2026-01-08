@@ -161,10 +161,8 @@ def api_data(symbol):
             if start_val != 0:
                 top_data = [{'x': p['x'], 'y': ((p['y'] - start_val) / start_val) * 100} for p in resampled]
     else:
-        # Calculate ROI/Yield for specific symbol
         cur.execute("SELECT timestamp, pnl_usd, value_usd FROM symbol_history WHERE symbol = ? AND timestamp > ? ORDER BY timestamp ASC", (symbol, month_ago))
         rows = cur.fetchall()
-        # Resample manual
         buckets = {}
         for r in rows:
             ts = int(r['timestamp'] // 3600) * 3600
