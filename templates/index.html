@@ -18,13 +18,14 @@
             background-color: #ffffff;
             color: #1a1a1a;
             height: 100vh;
-            overflow: hidden; /* No scrolling on main body */
+            overflow: hidden;
         }
         
-        /* Background Logo */
+        /* Logo Centered Top 25% */
         .bg-logo {
             position: absolute;
-            top: 50%; left: 62.5%; /* Center of the right 75% area */
+            top: 25%; 
+            left: 50%; 
             transform: translate(-50%, -50%);
             width: 400px;
             height: 400px;
@@ -32,39 +33,43 @@
             background-repeat: no-repeat;
             background-position: center;
             background-size: contain;
-            opacity: 0.15; /* 50% usually interferes too much with charts, tuned to 15% for readability, or strictly 0.5 if requested */
-            opacity: 0.5; 
+            opacity: 0.5;
             pointer-events: none;
             z-index: 0;
-        }
-
-        .chart-container {
-            position: relative;
-            z-index: 10;
         }
 
         /* Sidebar Item */
         .asset-item {
             cursor: pointer;
-            padding: 8px 0;
+            padding: 6px 0;
             font-family: 'JetBrains Mono', monospace;
             font-size: 1.1rem;
             transition: opacity 0.2s;
             opacity: 0.4;
+            color: #000;
         }
         .asset-item:hover { opacity: 0.8; }
         .asset-item.active { opacity: 1; font-weight: 600; }
 
-        /* Color Mapping Classes will be applied via JS styles */
-        
-        /* Time Labels */
+        /* Scrollbar hiding */
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+        /* Divider Control */
+        #chart-divider {
+            transition: opacity 0.2s;
+        }
+
+        /* Time Labels - Solid Black */
         .time-label {
             position: absolute;
             left: 50%;
             transform: translateX(-50%);
             font-family: 'JetBrains Mono', monospace;
             font-size: 2rem;
-            opacity: 0.2;
+            color: #000000; /* Explicit Black */
+            opacity: 1;     /* Full Opacity */
+            font-weight: 500;
             pointer-events: none;
             z-index: 0;
         }
@@ -74,10 +79,9 @@
 
     <div class="bg-logo"></div>
 
-    <div class="w-1/4 h-full flex flex-col justify-between p-8 border-r border-black z-20 bg-white/90 backdrop-blur-sm">
+    <div class="w-1/4 h-full flex flex-col justify-between p-8 z-20 bg-transparent">
         <div>
-            <div class="mb-8 font-mono text-xs text-gray-400">ASSETS</div>
-            <div id="asset-list" class="flex flex-col gap-2 h-[70vh] overflow-y-auto no-scrollbar">
+            <div id="asset-list" class="flex flex-col gap-2 h-[70vh] overflow-y-auto no-scrollbar pt-12">
                 <div class="text-sm text-gray-400">Loading...</div>
             </div>
         </div>
@@ -90,12 +94,14 @@
 
     <div class="w-3/4 h-full flex flex-col relative z-10">
         
-        <div class="h-1/2 w-full border-b border-black relative p-6">
+        <div class="h-1/2 w-full relative p-6 flex flex-col justify-end">
             <div class="time-label top-10">1M</div>
-            <div class="h-full w-full">
+            <div class="h-full w-full relative">
                 <canvas id="topChart"></canvas>
             </div>
         </div>
+
+        <div id="chart-divider" class="w-full border-b border-black opacity-0"></div>
 
         <div class="h-1/2 w-full relative p-6">
             <div class="time-label top-10">1d</div>
@@ -107,47 +113,38 @@
     </div>
 
     <script>
-        // --- CONFIGURATION ---
-        // Specific asset colors as requested: 
-        // "blue, green, brown, red, yellow, light blue, light green, light red, light yellow, pink"
         const colors = [
-            '#2563eb', // Blue
-            '#16a34a', // Green
-            '#854d0e', // Brown
-            '#dc2626', // Red
-            '#ca8a04', // Yellow
-            '#60a5fa', // Light Blue
-            '#4ade80', // Light Green
-            '#f87171', // Light Red
-            '#fde047', // Light Yellow
-            '#f472b6'  // Pink
+            '#2563eb', '#16a34a', '#854d0e', '#dc2626', '#ca8a04', 
+            '#60a5fa', '#4ade80', '#f87171', '#fde047', '#f472b6'
         ];
 
         let chartInstances = { top: null, bottom: null };
-        let activeSymbol = 'composite'; // 'composite' or symbol string
+        let activeSymbol = 'composite';
 
-        // Chart.js Globals
         Chart.defaults.font.family = "'JetBrains Mono', monospace";
         Chart.defaults.color = '#1a1a1a';
         
-        // --- LOGIC ---
-
         async function init() {
             try {
                 const res = await fetch('/api/init');
                 const data = await res.json();
                 renderSidebar(data.symbols);
-                loadData('composite'); // Load default view
-            } catch (e) {
-                console.error(e);
-            }
+                loadData('composite');
+            } catch (e) { console.error(e); }
+        }
+
+        function formatSymbolName(rawSym) {
+            let s = rawSym.toUpperCase().replace('USD', '');
+            if (s.startsWith('PF_')) s = s.replace('PF_', '');
+            else if (s.startsWith('FF_') || s.startsWith('FI_')) s = s.replace('_', '');
+            else s = s.replace('_', '');
+            return s;
         }
 
         function renderSidebar(symbols) {
             const container = document.getElementById('asset-list');
             container.innerHTML = '';
 
-            // Add "Composite" option implied as default state (or just resetting)
             const resetDiv = document.createElement('div');
             resetDiv.className = `asset-item ${activeSymbol === 'composite' ? 'active' : ''}`;
             resetDiv.innerText = "PORTFOLIO";
@@ -157,12 +154,8 @@
             symbols.forEach((sym, idx) => {
                 const el = document.createElement('div');
                 el.className = `asset-item ${activeSymbol === sym ? 'active' : ''}`;
-                el.innerText = sym;
-                
-                // Store color index for retrieval
-                el.dataset.colorIndex = idx % colors.length;
+                el.innerText = formatSymbolName(sym);
                 el.style.color = colors[idx % colors.length];
-                
                 el.onclick = () => { selectAsset(sym, idx); };
                 container.appendChild(el);
             });
@@ -171,11 +164,21 @@
         function selectAsset(symbol, colorIdx = -1) {
             activeSymbol = symbol;
             
-            // Update sidebar visual state
+            const divider = document.getElementById('chart-divider');
+            if (symbol === 'composite') {
+                divider.classList.add('opacity-0');
+            } else {
+                divider.classList.remove('opacity-0');
+            }
+            
             document.querySelectorAll('.asset-item').forEach(el => {
-                el.classList.remove('active');
-                if(el.innerText === symbol || (symbol === 'composite' && el.innerText === 'PORTFOLIO')) {
+                const isPortfolio = symbol === 'composite' && el.innerText === 'PORTFOLIO';
+                if(isPortfolio || (symbol !== 'composite' && el.innerText === formatSymbolName(symbol))) {
                     el.classList.add('active');
+                    el.style.opacity = '1';
+                } else {
+                    el.classList.remove('active');
+                    el.style.opacity = '0.4';
                 }
             });
 
@@ -187,50 +190,34 @@
             try {
                 const res = await fetch(`/api/data/${symbol}`);
                 const data = await res.json();
-                
                 renderTopChart(data.top, color, symbol === 'composite');
                 renderBottomChart(data.bottom, color);
-            } catch (e) {
-                console.error("Failed to load chart data", e);
-            }
+            } catch (e) { console.error(e); }
         }
 
         function renderTopChart(dataPoints, color, isComposite) {
             const ctx = document.getElementById('topChart').getContext('2d');
-            
             if (chartInstances.top) chartInstances.top.destroy();
 
-            // Prepare Datasets
             const datasets = [{
                 data: dataPoints,
                 borderColor: color,
-                borderWidth: 2,
+                borderWidth: 4, // THICKER LINE
                 pointRadius: 0,
-                tension: 0.1, // Slight curve, mostly jagged like sketch
+                tension: 0.1,
                 fill: false
             }];
 
-            // If Composite, add the +5% and -5% lines
-            if (isComposite) {
-                // We simulate lines by adding datasets that span the x-axis range
-                // Since X is time, this is tricky without Min/Max known. 
-                // Using a plugin is cleaner, but here's a standard workaround:
-                // We rely on the grid lines or we don't draw them as data, but as annotations if possible.
-                // Simpler: Just rely on Chart.js grid configuration to highlight +5 and -5 ticks?
-                // Or: Add a dataset with constant values.
-                if (dataPoints.length > 0) {
-                    const startX = dataPoints[0].x;
-                    const endX = dataPoints[dataPoints.length-1].x;
-                    
-                    datasets.push({
-                        data: [{x: startX, y: 5}, {x: endX, y: 5}],
-                        borderColor: '#000000', borderWidth: 1, pointRadius: 0, borderDash: [5, 5], label: '+5%'
-                    });
-                    datasets.push({
-                        data: [{x: startX, y: -5}, {x: endX, y: -5}],
-                        borderColor: '#000000', borderWidth: 1, pointRadius: 0, borderDash: [5, 5], label: '-5%'
-                    });
-                }
+            if (isComposite && dataPoints.length > 0) {
+                const startX = dataPoints[0].x;
+                const endX = dataPoints[dataPoints.length-1].x;
+                
+                const lineStyle = {
+                    borderColor: '#000000', borderWidth: 2, pointRadius: 0, borderDash: [] 
+                };
+                
+                datasets.push({ ...lineStyle, data: [{x: startX, y: 5}, {x: endX, y: 5}] });
+                datasets.push({ ...lineStyle, data: [{x: startX, y: -5}, {x: endX, y: -5}] });
             }
 
             chartInstances.top = new Chart(ctx, {
@@ -239,39 +226,21 @@
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
-                    plugins: { legend: { display: false } },
+                    plugins: { legend: { display: false }, tooltip: { enabled: false } }, 
                     scales: {
-                        x: {
-                            type: 'time',
-                            time: { unit: 'day' },
-                            grid: { display: false },
-                            border: { display: false }
-                        },
-                        y: {
-                            position: 'right',
-                            grid: {
-                                color: (ctx) => (ctx.tick.value === 5 || ctx.tick.value === -5) && isComposite ? '#000000' : 'rgba(0,0,0,0.05)',
-                                lineWidth: (ctx) => (ctx.tick.value === 5 || ctx.tick.value === -5) && isComposite ? 1 : 1
-                            },
-                            ticks: {
-                                callback: function(value) { return value + '%' }
-                            }
-                        }
-                    }
+                        x: { display: false }, 
+                        y: { display: false }
+                    },
+                    layout: { padding: 0 }
                 }
             });
         }
 
         function renderBottomChart(dataPoints, color) {
             const ctx = document.getElementById('bottomChart').getContext('2d');
-            
             if (chartInstances.bottom) chartInstances.bottom.destroy();
 
-            // If no data (Composite view usually has no "size"), show empty or handle gracefully
-            if (!dataPoints || dataPoints.length === 0) {
-                 // Clear canvas if needed or show "Select asset"
-                 return;
-            }
+            if (!dataPoints || dataPoints.length === 0) return;
 
             chartInstances.bottom = new Chart(ctx, {
                 type: 'bar',
@@ -280,27 +249,28 @@
                         data: dataPoints.map(d => ({x: d.timestamp * 1000, y: d.qty})),
                         backgroundColor: color,
                         barThickness: 'flex',
-                        maxBarThickness: 10
+                        maxBarThickness: 10 // Slightly thicker bars for weight
                     }]
                 },
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
-                    plugins: { legend: { display: false } },
+                    plugins: { legend: { display: false }, tooltip: { enabled: false } },
                     scales: {
-                        x: {
-                            type: 'time',
-                            time: { unit: 'hour' }, // 15m data, show hour ticks
-                            grid: { display: false }
-                        },
+                        x: { display: false }, 
                         y: {
-                            position: 'right',
+                            display: true, 
+                            drawBorder: false, 
+                            ticks: { display: false }, 
                             grid: {
-                                color: (ctx) => ctx.tick.value === 0 ? '#000000' : 'rgba(0,0,0,0)',
-                                lineWidth: 1
+                                color: (ctx) => ctx.tick.value === 0 ? '#000000' : 'transparent',
+                                lineWidth: 2, // Thicker Zero Line
+                                drawBorder: false,
+                                drawTicks: false
                             }
                         }
-                    }
+                    },
+                    layout: { padding: 0 }
                 }
             });
         }
@@ -315,9 +285,7 @@
             } catch(e) {}
         }
 
-        // Init
         init();
-
     </script>
 </body>
 </html>
