@@ -15,9 +15,9 @@ import logging
 from datetime import datetime, timedelta
 
 from flask import Flask, render_template, jsonify, g
-from dotenv import load_dotenv  # <--- NEW: Import dotenv
+from dotenv import load_dotenv
 
-# <--- NEW: Load environment variables from .env file immediately
+# Load environment variables from .env file immediately
 load_dotenv()
 
 try:
@@ -36,9 +36,13 @@ logger = logging.getLogger("Primate")
 
 DB_FILE = os.getenv('DB_FILE_PATH', 'primate.db')
 FETCH_INTERVAL = 10
+
+# <--- UPDATED: Using new environment variable names
 API_KEY = os.getenv("K_API_KEY", "")
 API_SECRET = os.getenv("K_API_SECRET", "")
-CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "y.z.com")
+# --------------------------------------------------
+
+CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "contact@companyprimate.com")
 
 def get_db():
     db = getattr(g, '_database', None)
