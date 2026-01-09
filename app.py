@@ -15,6 +15,10 @@ import logging
 from datetime import datetime, timedelta
 
 from flask import Flask, render_template, jsonify, g
+from dotenv import load_dotenv  # <--- NEW: Import dotenv
+
+# <--- NEW: Load environment variables from .env file immediately
+load_dotenv()
 
 try:
     from kraken_futures import KrakenFuturesApi
