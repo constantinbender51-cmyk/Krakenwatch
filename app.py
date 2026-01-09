@@ -36,9 +36,9 @@ logger = logging.getLogger("Primate")
 
 DB_FILE = os.getenv('DB_FILE_PATH', 'primate.db')
 FETCH_INTERVAL = 10
-API_KEY = os.getenv("KRAKEN_KEY", "")
-API_SECRET = os.getenv("KRAKEN_SECRET", "")
-CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "contact@companyprimate.com")
+API_KEY = os.getenv("K_API_KEY", "")
+API_SECRET = os.getenv("K_API_SECRET", "")
+CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "y.z.com")
 
 def get_db():
     db = getattr(g, '_database', None)
