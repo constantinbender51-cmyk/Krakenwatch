@@ -21,14 +21,14 @@
             overflow: hidden;
         }
         
-        /* Logo Centered Top 25% */
+        /* Logo: Updated to top 10% and larger size */
         .bg-logo {
             position: absolute;
-            top: 25%; 
+            top: 10%; 
             left: 50%; 
-            transform: translate(-50%, -50%);
-            width: 400px;
-            height: 400px;
+            transform: translate(-50%, -10%);
+            width: 600px;
+            height: 600px;
             background-image: url('https://i.postimg.cc/QxYJKvBy/1767741251392.png');
             background-repeat: no-repeat;
             background-position: center;
@@ -199,20 +199,33 @@
             const ctx = document.getElementById('topChart').getContext('2d');
             if (chartInstances.top) chartInstances.top.destroy();
 
+            // Gap Logic: 2 hours in ms
+            const GAP_THRESHOLD = 2 * 60 * 60 * 1000; 
+
             const datasets = [{
                 data: dataPoints,
                 borderColor: color,
-                borderWidth: 4, 
+                borderWidth: 1.5,  // <--- THINNER LINES
                 pointRadius: 0,
                 tension: 0.1,
-                fill: false
+                fill: false,
+                spanGaps: false, // Don't connect nulls
+                segment: {
+                    // Create gap if time difference > threshold (handled on frontend)
+                    borderColor: ctx => {
+                        const p0 = ctx.p0.parsed.x;
+                        const p1 = ctx.p1.parsed.x;
+                        if (p1 - p0 > GAP_THRESHOLD) return 'transparent';
+                        return undefined;
+                    }
+                }
             }];
 
             if (isComposite && dataPoints.length > 0) {
                 const startX = dataPoints[0].x;
                 const endX = dataPoints[dataPoints.length-1].x;
                 const lineStyle = {
-                    borderColor: '#000000', borderWidth: 2, pointRadius: 0, borderDash: [] 
+                    borderColor: '#000000', borderWidth: 1.5, pointRadius: 0, borderDash: [] 
                 };
                 datasets.push({ ...lineStyle, data: [{x: startX, y: 5}, {x: endX, y: 5}] });
                 datasets.push({ ...lineStyle, data: [{x: startX, y: -5}, {x: endX, y: -5}] });
@@ -226,10 +239,7 @@
                     maintainAspectRatio: false,
                     plugins: { legend: { display: false }, tooltip: { enabled: false } }, 
                     scales: {
-                        x: { 
-                            type: 'time', // FIXED: Added time type
-                            display: false 
-                        }, 
+                        x: { type: 'time', display: false }, 
                         y: { display: false }
                     },
                     layout: { padding: 0 }
@@ -243,14 +253,18 @@
 
             if (!dataPoints || dataPoints.length === 0) return;
 
+            // SYMMETRY LOGIC
+            const maxAbs = Math.max(...dataPoints.map(d => Math.abs(d.qty)));
+            const limit = maxAbs * 1.1; // Add 10% padding
+
             chartInstances.bottom = new Chart(ctx, {
                 type: 'bar',
                 data: {
                     datasets: [{
                         data: dataPoints.map(d => ({x: d.timestamp * 1000, y: d.qty})),
-                        backgroundColor: '#93c5fd', // Fixed Light Blue
+                        backgroundColor: '#93c5fd', 
                         barThickness: 'flex',
-                        maxBarThickness: 2 // Thin lines
+                        maxBarThickness: 2
                     }]
                 },
                 options: {
@@ -258,12 +272,11 @@
                     maintainAspectRatio: false,
                     plugins: { legend: { display: false }, tooltip: { enabled: false } },
                     scales: {
-                        x: { 
-                            type: 'time', // FIXED: Added time type
-                            display: false 
-                        }, 
+                        x: { type: 'time', display: false }, 
                         y: {
                             display: true, 
+                            min: -limit, // <--- SYMMETRY
+                            max: limit,  // <--- SYMMETRY
                             drawBorder: false, 
                             ticks: { display: false }, 
                             grid: {
