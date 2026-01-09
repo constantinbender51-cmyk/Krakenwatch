@@ -226,7 +226,10 @@
                     maintainAspectRatio: false,
                     plugins: { legend: { display: false }, tooltip: { enabled: false } }, 
                     scales: {
-                        x: { display: false }, 
+                        x: { 
+                            type: 'time', // FIXED: Added time type
+                            display: false 
+                        }, 
                         y: { display: false }
                     },
                     layout: { padding: 0 }
@@ -255,7 +258,10 @@
                     maintainAspectRatio: false,
                     plugins: { legend: { display: false }, tooltip: { enabled: false } },
                     scales: {
-                        x: { display: false }, 
+                        x: { 
+                            type: 'time', // FIXED: Added time type
+                            display: false 
+                        }, 
                         y: {
                             display: true, 
                             drawBorder: false, 
