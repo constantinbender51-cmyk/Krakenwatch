@@ -37,11 +37,8 @@ logger = logging.getLogger("Primate")
 DB_FILE = os.getenv('DB_FILE_PATH', 'primate.db')
 FETCH_INTERVAL = 10
 
-# <--- UPDATED: Using new environment variable names
 API_KEY = os.getenv("K_API_KEY", "")
 API_SECRET = os.getenv("K_API_SECRET", "")
-# --------------------------------------------------
-
 CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "contact@companyprimate.com")
 
 def get_db():
@@ -176,9 +173,15 @@ def api_data(symbol):
             ts = int(r['timestamp'] // 3600) * 3600
             val = r['value_usd']
             pnl = r['pnl_usd']
-            roi = 0
-            if (val - pnl) > 0: roi = (pnl / (val - pnl)) * 100
-            buckets[ts] = roi
+            
+            # Logic for Gaps: If value is negligible, send None (null)
+            if abs(val) < 10: 
+                buckets[ts] = None
+            else:
+                roi = 0
+                if (val - pnl) > 0: roi = (pnl / (val - pnl)) * 100
+                buckets[ts] = roi
+                
         top_data = [{'x': t*1000, 'y': buckets[t]} for t in sorted(buckets.keys())]
 
     # Bottom Chart (1 Day, 15m)
