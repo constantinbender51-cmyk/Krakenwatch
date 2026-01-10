@@ -76,9 +76,9 @@ class KrakenFuturesApi:
             if query_str:
                 url += "?" + query_str
             
-            # FIX: The History API (endpoints starting with /api/history) requires 
-            # the query string in the signature even for GET requests.
-            # The standard /derivatives API does NOT.
+            # CRITICAL FIX: The History API (endpoints starting with /api/history) 
+            # requires the query string in the signature even for GET requests.
+            # The standard /derivatives API does NOT include it for GETs.
             if endpoint.startswith("/api/history"):
                 post_data_for_sig = query_str
 
@@ -138,8 +138,11 @@ class KrakenFuturesApi:
         return self._request("GET", "/derivatives/api/v3/recentorders", params)
 
     def get_fills(self, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        # FIX: Changed endpoint from /derivatives/... to /api/history/...
-        return self._request("GET", "/api/history/v3/fills", params)
+        """
+        Retrieves execution history (fills).
+        Note: Uses the History API (/api/history/v3/executions) to ensure data availability.
+        """
+        return self._request("GET", "/api/history/v3/executions", params)
 
     def get_account_log(self) -> Dict[str, Any]:
         return self._request("GET", "/api/history/v2/account-log")
