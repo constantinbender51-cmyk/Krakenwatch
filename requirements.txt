@@ -1,4 +1,3 @@
 python-dotenv
-Flask
 requests
 gunicorn
