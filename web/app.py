@@ -32,25 +32,31 @@ def parse_logs(log_data):
     
     lines = log_data.split('\n')
     for line in lines:
-        # Regex to extract: Asset, New Val, Old Val
-        # Looks for: Change PF_[Asset] [New]/[Old]
-        # Example: Change PF_DOTUSD 22.4/22.2
-        match = re.search(r'Change PF_([A-Z0-9]+)USD\s+([-\d\.]+)/([-\d\.]+)', line)
+        # UPDATED REGEX:
+        # 1. Matches asset name inside PF_...USD
+        # 2. Skips the quantity part (.*? matches the size/size part)
+        # 3. Captures the specific number after "Profit: "
+        match = re.search(r'Change PF_([A-Z0-9]+)USD\s+.*?Profit:\s+([-\d\.]+)', line)
         
         if match:
             asset = match.group(1) # Extracts 'DOT' from 'PF_DOTUSD'
-            new_val = float(match.group(2))
-            old_val = float(match.group(3))
             
-            profit = new_val - old_val
-            
-            if asset not in stats:
-                stats[asset] = {'P': 0.0, 'T': 0, 'Wins': 0}
-            
-            stats[asset]['P'] += profit
-            stats[asset]['T'] += 1
-            if profit > 0:
-                stats[asset]['Wins'] += 1
+            try:
+                # Directly use the profit calculated by the logger script
+                profit = float(match.group(2))
+                
+                if asset not in stats:
+                    stats[asset] = {'P': 0.0, 'T': 0, 'Wins': 0}
+                
+                stats[asset]['P'] += profit
+                stats[asset]['T'] += 1
+                
+                # Check for win based on the explicit profit value
+                if profit > 0:
+                    stats[asset]['Wins'] += 1
+                    
+            except ValueError:
+                continue
                 
     return stats
 
@@ -106,7 +112,7 @@ def generate_html_content(stats):
     
     rows_html = ""
     
-    # Sort assets alphabetically if desired, or keep insertion order
+    # Sort assets alphabetically
     for asset in sorted(stats.keys()):
         data = stats[asset]
         # Calculate Accuracy for this asset
