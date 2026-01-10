@@ -72,6 +72,7 @@ def generate_html_content(stats):
             flex-direction: column;
             align-items: center;
             padding-top: 50px;
+            margin: 0;
         }
         h1 {
             text-align: center;
@@ -79,23 +80,45 @@ def generate_html_content(stats):
             text-transform: uppercase;
             font-weight: normal;
             margin-bottom: 60px;
+            font-size: 32px;
         }
         table {
             border-collapse: collapse;
             border: none;
             font-size: 18px;
+            /* Fixed layout ensures columns don't shift based on content length */
+            table-layout: fixed;
+            width: 700px; 
         }
-        th, td {
-            padding: 15px 30px;
+        th {
+            font-weight: normal;
+            color: #888;
+            padding-bottom: 20px;
+            text-align: center;
+        }
+        td {
+            padding: 15px 0;
             text-align: center;
             border: none;
         }
+        
+        /* PTA Alignment Logic:
+           We divide the table into 4 equal columns (25% each).
+           This ensures P, T, and A take up equal visual space.
+        */
+        th, td {
+            width: 25%;
+        }
+
         /* The Asset Names column (last column) styling */
         td:last-child {
             font-weight: bold;
             text-align: left;
-            padding-left: 40px;
+            /* Padding ensures the text starts slightly offset from the center of the column */
+            padding-left: 50px; 
+            box-sizing: border-box;
         }
+        
         /* The Total Row styling */
         tr.total-row td {
             padding-top: 40px;
@@ -140,12 +163,12 @@ def generate_html_content(stats):
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Trading Summary</title>
+        <title>Primate</title>
         {css}
         <meta http-equiv="refresh" content="60">
     </head>
     <body>
-        <h1>Trade View</h1>
+        <h1>Primate</h1>
         
         <table>
             <tr>
