@@ -140,7 +140,7 @@ class KrakenFuturesApi:
     def get_fills(self, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Retrieves execution history (fills).
-        Note: Uses the History API (/api/history/v3/executions) to ensure data availability.
+        Uses the History API (/api/history/v3/executions) to ensure data availability.
         """
         return self._request("GET", "/api/history/v3/executions", params)
 
