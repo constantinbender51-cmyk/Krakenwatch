@@ -94,44 +94,46 @@ def get_position_details(api_client):
         print(f"Error fetching positions: {e}")
         return {}
 
-def get_recent_fill_price(api_client, symbol, lookback_seconds=60):
+def get_recent_fill_price(api_client, symbol, lookback_seconds=45):
     """
     Fetches the most recent fill price for a symbol.
-    Returns (price, timestamp_dt) or (None, None).
+    Returns the price (float) or None if no matching fill is found.
     """
     try:
-        # Note: Based on your logs, the key is 'elements', not 'fills'
+        # Based on your log, the correct key is 'elements'
         response = api_client.get_fills() 
-        fills = response.get("elements", []) # Changed from 'fills' to 'elements'
+        fills = response.get("elements", [])
         
+        # Determine the oldest time we accept (current time - 45s)
         cutoff_time = datetime.now() - timedelta(seconds=lookback_seconds)
         
-        # Sort by timestamp descending just in case
-        # Timestamps in your log are integers (ms) e.g. 1768024911575
+        # 1. Sort by timestamp descending (newest first)
+        # Your logs show timestamp as an integer (milliseconds)
         fills.sort(key=lambda x: x.get('timestamp', 0), reverse=True)
 
         for fill in fills:
-            # Check symbol match (your log has 'tradeable' or inside 'instrument'?)
-            # The log you pasted structure: fill['event']['execution']['execution']['order']['tradeable'] == 'PF_XBTUSD'
-            # OR sometimes simpler flat structure depending on API version. 
-            # Let's try to extract safely.
-            
             try:
-                # Deep extraction based on your log structure
+                # 2. Extract Data deeply nested in 'event' -> 'execution'
                 execution = fill.get('event', {}).get('execution', {}).get('execution', {})
+                
+                # Verify Symbol
                 fill_symbol = execution.get('order', {}).get('tradeable')
-                fill_price_str = execution.get('price')
-                fill_ts_ms = fill.get('timestamp')
-            except:
-                continue
+                if fill_symbol != symbol:
+                    continue
+
+                # Verify Time
+                fill_ts_ms = fill.get('timestamp', 0)
+                fill_dt = datetime.fromtimestamp(fill_ts_ms / 1000.0)
                 
-            if fill_symbol != symbol:
-                continue
+                if fill_dt < cutoff_time:
+                    # Since list is sorted new -> old, if we hit an old one, we can stop.
+                    break
                 
-            fill_dt = datetime.fromtimestamp(fill_ts_ms / 1000.0)
-            
-            if fill_dt > cutoff_time:
-                return float(fill_price_str)
+                # If we are here, we found the newest valid fill
+                return float(execution.get('price'))
+
+            except Exception:
+                continue
 
         return None
     except Exception as e:
@@ -147,7 +149,6 @@ def main():
     api = KrakenFuturesApi(KRAKEN_KEY, KRAKEN_SECRET)
     
     print("Starting monitor...")
-    # Map: {symbol: {'size': 10, 'entryPrice': 50000}}
     previous_state = get_position_details(api)
     print(f"Initial state: {previous_state}")
 
@@ -170,51 +171,43 @@ def main():
                 old_entry = prev_data['entryPrice']
 
                 if new_qty != old_qty:
-                    # Determine PnL only if we REDUCED a position (Realized PnL)
-                    # or flipped it.
-                    # Simple PnL calc: (Exit - Entry) * Qty_Closed
-                    
-                    qty_delta = new_qty - old_qty
                     pnl_str = ""
                     
-                    # We only calculate Realized PnL if size decreased in absolute terms (closed out)
-                    # or crossed zero.
-                    # If we just ADDED to a position, realized pnl is 0 (usually).
+                    # Logic: Only calculate profit if position size DECREASED (absolute value)
+                    # abs(new) < abs(old) means we closed some portion.
                     
                     is_reduction = abs(new_qty) < abs(old_qty)
-                    is_flip = (new_qty * old_qty) < 0
+                    is_flip = (new_qty * old_qty) < 0  # Changed from Long to Short or vice versa
                     is_close = (new_qty == 0 and old_qty != 0)
 
+                    # Only proceed if we reduced/closed AND we had a valid entry price
                     if (is_reduction or is_flip or is_close) and old_entry > 0:
-                        # Fetch the execution price from fills
+                        
+                        # Fetch the EXACT execution price from the last 45s
                         exec_price = get_recent_fill_price(api, sym, lookback_seconds=45)
                         
                         if exec_price:
-                            # Calculate Amount Closed
-                            # If Long (Pos > 0) and Delta < 0 -> We Sold.
-                            #   PnL = (Exec - Entry) * Abs(Delta)
-                            # If Short (Pos < 0) and Delta > 0 -> We Bought.
-                            #   PnL = (Entry - Exec) * Abs(Delta)
-                            
-                            # Note: For flips, this is an approximation of the closed portion.
-                            closed_qty = abs(qty_delta) 
-                            # Refine closed_qty for flips? 
-                            # If flipped +10 to -5, delta is -15. We only closed 10.
-                            if is_flip:
-                                closed_qty = abs(old_qty)
+                            # How much did we close?
+                            # For simple reduction: just the difference
+                            # For a flip: we closed the entire old_qty
+                            closed_qty = abs(old_qty) if is_flip else abs(new_qty - old_qty)
                             
                             calculated_pnl = 0.0
-                            if old_qty > 0: # Long
+                            
+                            if old_qty > 0: # Long Close
+                                # (Sell Price - Buy Price) * Qty
                                 calculated_pnl = (exec_price - old_entry) * closed_qty
-                            else: # Short
+                            else: # Short Close
+                                # (Sell Price - Buy Price) * Qty 
+                                # Short math: (Entry - Exit) * Qty
                                 calculated_pnl = (old_entry - exec_price) * closed_qty
                                 
                             pnl_str = f"Profit: {calculated_pnl:.2f}"
                         else:
-                            pnl_str = "Profit: ?? (No fill found)"
+                            pnl_str = "Profit: ? (Fill too old)"
                     else:
-                        # Increasing position = No Realized Profit
-                        pnl_str = "Profit: 0.00 (Added)"
+                        # If size increased, we just log the change, no profit yet
+                        pnl_str = "(Position Added)"
 
                     # Log Format
                     log_entry = f"Change {sym} {new_qty}/{old_qty} {pnl_str} {timestamp}"
