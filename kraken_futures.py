@@ -53,7 +53,14 @@ class KrakenFuturesApi:
         params = params or {}
         url = self.base_url + endpoint
         nonce = self._create_nonce()
-        post_data = ""
+        
+        # Prepare the query string
+        query_str = urllib.parse.urlencode(params) if params else ""
+        
+        # Determine post_data for signature and body
+        post_data_for_sig = ""
+        data_payload = None
+
         headers = {
             "APIKey": self.api_key,
             "Nonce": nonce,
@@ -61,14 +68,23 @@ class KrakenFuturesApi:
         }
 
         if method.upper() == "POST":
-            post_data = urllib.parse.urlencode(params)
+            post_data_for_sig = query_str
+            data_payload = query_str
             headers["Content-Type"] = "application/x-www-form-urlencoded"
-        elif params:
-            url += "?" + urllib.parse.urlencode(params)
+        else:
+            # GET request
+            if query_str:
+                url += "?" + query_str
+            
+            # FIX: The History API (endpoints starting with /api/history) requires 
+            # the query string in the signature even for GET requests.
+            # The standard /derivatives API does NOT.
+            if endpoint.startswith("/api/history"):
+                post_data_for_sig = query_str
 
-        headers["Authent"] = self._sign_request(endpoint, nonce, post_data)
+        headers["Authent"] = self._sign_request(endpoint, nonce, post_data_for_sig)
 
-        rsp = requests.request(method, url, headers=headers, data=post_data or None)
+        rsp = requests.request(method, url, headers=headers, data=data_payload)
         if not rsp.ok:
             raise RuntimeError(f"{method} {endpoint} failed : {rsp.text}")
         return rsp.json()
@@ -122,7 +138,8 @@ class KrakenFuturesApi:
         return self._request("GET", "/derivatives/api/v3/recentorders", params)
 
     def get_fills(self, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        return self._request("GET", "/derivatives/api/v3/fills", params)
+        # FIX: Changed endpoint from /derivatives/... to /api/history/...
+        return self._request("GET", "/api/history/v3/fills", params)
 
     def get_account_log(self) -> Dict[str, Any]:
         return self._request("GET", "/api/history/v2/account-log")
@@ -137,15 +154,6 @@ class KrakenFuturesApi:
         """Return single order status."""
         return self._request("GET", "/derivatives/api/v3/orders", {"order_id": order_id})
 
-    def get_order_events(self, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """
-        Fetches order history/events from /api/history/v3/orders.
-        This includes open, filled, cancelled, and rejected orders.
-        """
-        response = self._request("GET", "/api/history/v3/orders", params)
-        # The API typically returns an object with an 'elements' array for history
-        return response.get('elements', response)
-
 # ------------------------------------------------------------------
 # quick self-test
 # ------------------------------------------------------------------
@@ -158,7 +166,13 @@ if __name__ == "__main__":
     api = KrakenFuturesApi(KEY, SEC)
 
     print("--- public tickers ---")
-    print(api.get_tickers()["tickers"][:2])
+    try:
+        print(api.get_tickers()["tickers"][:2])
+    except Exception as e:
+        print(f"Tickers failed: {e}")
 
     print("\n--- private accounts ---")
-    print(api.get_accounts())
+    try:
+        print(api.get_accounts())
+    except Exception as e:
+        print(f"Accounts failed: {e}")
