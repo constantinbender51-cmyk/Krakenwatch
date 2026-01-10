@@ -2,7 +2,7 @@ import os
 import time
 import base64
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 from kraken_futures import KrakenFuturesApi
 
 # --- Configuration ---
@@ -99,6 +99,49 @@ def get_position_map(api_client):
         print(f"Error fetching positions: {e}")
         return {}
 
+def get_recent_fills_pnl(api_client, symbol, lookback_seconds=60):
+    """
+    Fetches recent fills and sums the realized PnL for the specific symbol
+    occurred within the last 'lookback_seconds'.
+    """
+    try:
+        # Get last 100 fills
+        response = api_client.get_fills()
+        fills = response.get("fills", [])
+        
+        total_pnl = 0.0
+        
+        # Calculate cutoff time
+        cutoff_time = datetime.now() - timedelta(seconds=lookback_seconds)
+        
+        for fill in fills:
+            fill_time_str = fill.get("fillTime")
+            fill_symbol = fill.get("symbol")
+            
+            # Skip if symbol doesn't match
+            if fill_symbol != symbol:
+                continue
+
+            try:
+                # Basic ISO parsing
+                fill_dt = datetime.strptime(fill_time_str.replace("Z", ""), "%Y-%m-%dT%H:%M:%S.%f")
+            except ValueError:
+                try:
+                    fill_dt = datetime.strptime(fill_time_str.replace("Z", ""), "%Y-%m-%dT%H:%M:%S")
+                except:
+                    continue 
+
+            if fill_dt > cutoff_time:
+                # Add up realized PnL 
+                pnl = float(fill.get("realizedPnl", 0.0))
+                total_pnl += pnl
+                
+        return total_pnl
+
+    except Exception as e:
+        print(f"Error calculating PnL for {symbol}: {e}")
+        return 0.0
+
 # --- Main Loop ---
 def main():
     if not all([GITHUB_TOKEN, KRAKEN_KEY, KRAKEN_SECRET]):
@@ -107,6 +150,23 @@ def main():
 
     api = KrakenFuturesApi(KRAKEN_KEY, KRAKEN_SECRET)
     
+    # --- STARTUP TEST: Check Fills ---
+    print("--- Testing Connectivity & Fills Access ---")
+    try:
+        test_fills = api.get_fills()
+        if 'fills' in test_fills:
+            fill_list = test_fills['fills']
+            print(f"Success: Retrieved {len(fill_list)} recent fills.")
+            if len(fill_list) > 0:
+                print(f"Latest fill sample: {fill_list[0]}")
+            else:
+                print("Note: No historical fills found on account.")
+        else:
+            print(f"Warning: Unexpected response from get_fills: {test_fills}")
+    except Exception as e:
+        print(f"CRITICAL: Failed to fetch fills. Check API Key permissions. Error: {e}")
+    print("-------------------------------------------")
+
     # Initialize state
     print("Starting monitor...")
     previous_positions = get_position_map(api)
@@ -123,7 +183,7 @@ def main():
             changes_to_log = []
             timestamp = datetime.now().strftime("%H:%M:%S")
 
-            # Identify all unique symbols involved (in either current or previous)
+            # Identify all unique symbols involved
             all_symbols = set(current_positions.keys()) | set(previous_positions.keys())
 
             for sym in all_symbols:
@@ -131,20 +191,17 @@ def main():
                 new_qty = current_positions.get(sym, 0.0)
 
                 if new_qty != old_qty:
-                    # Format: Change [symbol] new/old [time]
-                    # Example: Change pf_ethusd 4.5/0 19:05:40
+                    # Calculate PnL for this change (lookback 40s to cover the sleep interval)
+                    pnl_value = get_recent_fills_pnl(api, sym, lookback_seconds=40)
                     
-                    # Convert floats to string, removing trailing .0 if integer to look cleaner
-                    # or keep standard float representation. 
-                    # Using generic str() for simplicity.
-                    log_entry = f"Change {sym} {new_qty}/{old_qty} {timestamp}"
+                    # Log Format: Change [symbol] new/old PnL: [value] [time]
+                    log_entry = f"Change {sym} {new_qty}/{old_qty} PnL: {pnl_value:.2f} {timestamp}"
                     print(log_entry)
                     changes_to_log.append(log_entry)
 
             # If we detected changes, push to GitHub
             if changes_to_log:
                 append_to_github(changes_to_log)
-                # Update our local state only after processing changes
                 previous_positions = current_positions
 
         except KeyboardInterrupt:
