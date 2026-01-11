@@ -332,14 +332,14 @@ def run_strict_verification(models_cache):
     return passed_all
 
 def populate_weekly_history(models_cache):
-    """Iterates last 7 days to build a signal log."""
-    print("\n--- Generating Last 7 Days Signal Log ---")
+    """Iterates last 10 days to build a signal log, IGNORING incomplete candles."""
+    print("\n--- Generating Signal Log ---")
     global HISTORY_LOG
     logs = []
     
     for asset in ASSETS:
-        # Get 7 days raw 15m data
-        raw_data = get_binance_recent(asset, days=7)
+        # Get 10 days raw 15m data (Safe buffer)
+        raw_data = get_binance_recent(asset, days=10)
         
         for tf_name, model_data in models_cache.get(asset, {}).items():
             strategies = model_data['strategies']
@@ -356,12 +356,15 @@ def populate_weekly_history(models_cache):
             max_seq = max(s['seq_len'] for s in strategies)
             start_idx = max_seq + 1
             
+            # FIX: Iterate only up to len(prices) - 1
+            # We must ignore the very last bucket because it is likely incomplete/forming.
+            # This matches the Logic in update_live_signals.
             if len(prices) <= start_idx: continue
             
-            for i in range(start_idx, len(prices)):
+            for i in range(start_idx, len(prices)): 
                 hist_prices = prices[:i] # Prices *before* the target timestamp
                 current_price = prices[i-1] # The price at the moment of prediction
-                target_ts = timestamps[i]
+                target_ts = timestamps[i] # The "Future" time we are predicting for (but currently in)
                 
                 # Signal generated at T-1 for target T
                 sig = generate_signal(hist_prices, strategies)
@@ -390,7 +393,8 @@ def update_live_signals(models_cache):
     # Update Matrix
     for asset in ASSETS:
         temp_matrix[asset] = {}
-        raw_data = get_binance_recent(asset, days=5)
+        # FIX: 10 days is a safe buffer for 4H candles (60 candles)
+        raw_data = get_binance_recent(asset, days=10)
         
         for tf_name, model_data in models_cache.get(asset, {}).items():
             strategies = model_data['strategies']
@@ -468,7 +472,7 @@ def home():
             </tbody>
         </table>
         
-        <h2>Signals (Last 7 Days)</h2>
+        <h2>Signals (Last 10 Days)</h2>
         <table>
             <thead>
                 <tr>
