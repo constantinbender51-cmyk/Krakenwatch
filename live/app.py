@@ -181,26 +181,44 @@ def get_binance_recent(symbol, days=20):
 # --- 3. INFERENCE LOGIC ---
 
 def get_prediction(model_type, abs_map, der_map, a_seq, d_seq, last_val, all_vals, all_changes):
-    import random
+    # Removed 'import random' to ensure deterministic behavior
+    
     if model_type == "Absolute":
-        if a_seq in abs_map: return abs_map[a_seq].most_common(1)[0][0]
-        return random.choice(all_vals)
+        if a_seq in abs_map: 
+            return abs_map[a_seq].most_common(1)[0][0]
+        else:
+            # Fallback: Unseen pattern -> Neutral (Hold current price)
+            print(f"[Notice] Unseen Absolute Pattern: {a_seq}")
+            return last_val
+
     elif model_type == "Derivative":
-        if d_seq in der_map: pred_change = der_map[d_seq].most_common(1)[0][0]
-        else: pred_change = random.choice(all_changes)
-        return last_val + pred_change
+        if d_seq in der_map: 
+            pred_change = der_map[d_seq].most_common(1)[0][0]
+            return last_val + pred_change
+        else:
+            # Fallback: Unseen pattern -> Neutral (0 change)
+            print(f"[Notice] Unseen Derivative Pattern: {d_seq}")
+            return last_val
+
     elif model_type == "Combined":
         abs_cand = abs_map.get(a_seq, Counter())
         der_cand = der_map.get(d_seq, Counter())
+        
         poss = set(abs_cand.keys())
         for c in der_cand.keys(): poss.add(last_val + c)
         
-        if not poss: return random.choice(all_vals)
+        if not poss: 
+            # Fallback: Both models failed to recognize pattern
+            print(f"[Notice] Unseen Combined Pattern: Abs={a_seq}, Der={d_seq}")
+            return last_val
+            
         best, max_s = None, -1
         for v in poss:
             s = abs_cand[v] + der_cand[v - last_val]
             if s > max_s: max_s, best = s, v
-        return best
+        
+        return best if best is not None else last_val
+
     return last_val
 
 def generate_signal(prices, strategies):
