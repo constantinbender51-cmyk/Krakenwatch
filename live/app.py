@@ -399,10 +399,18 @@ def json_api():
 # --- MAIN ENTRY ---
 
 def run_scheduler(models_cache):
-    # Initial run
+    # Initial run immediately so you don't wait for the first quarter hour
+    print("Running initial update...")
     update_live_signals(models_cache)
-    # Schedule every 15 mins
-    schedule.every(15).minutes.do(update_live_signals, models_cache)
+    
+    # Schedule strict clock alignments
+    # Note: We run these for every hour
+    schedule.every().hour.at(":00").do(update_live_signals, models_cache)
+    schedule.every().hour.at(":15").do(update_live_signals, models_cache)
+    schedule.every().hour.at(":30").do(update_live_signals, models_cache)
+    schedule.every().hour.at(":45").do(update_live_signals, models_cache)
+    
+    print("[Scheduler] Aligned to clock marks: :00, :15, :30, :45")
     
     while True:
         schedule.run_pending()
