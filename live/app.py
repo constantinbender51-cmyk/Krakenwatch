@@ -55,10 +55,16 @@ def parse_map_key(key_str):
         return ()
 
 def deserialize_map(json_map):
-    """Converts the JSON-loaded map back to {tuple: Counter}"""
+    """Converts the JSON-loaded map back to {tuple: Counter(int: int)}"""
     clean_map = {}
     for k, v in json_map.items():
-        clean_map[parse_map_key(k)] = Counter(v)
+        # k is "1|2|3" -> converted to tuple (1, 2, 3)
+        # v is {"105": 5} -> keys are strings from JSON, must be converted to int
+        
+        # FIX: Convert inner dict keys from string to int
+        int_counter = Counter({int(inner_k): inner_v for inner_k, inner_v in v.items()})
+        
+        clean_map[parse_map_key(k)] = int_counter
     return clean_map
 
 def resample_prices(raw_data, target_freq):
