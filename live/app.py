@@ -125,27 +125,44 @@ def get_binance_recent_data(symbol, days=60):
     end_ts = int(time.time() * 1000)
     start_ts = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
     
-    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={BASE_INTERVAL}&startTime={start_ts}&endTime={end_ts}&limit=1000"
+    # FIX: Do not include startTime in the base URL
+    base_url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={BASE_INTERVAL}&endTime={end_ts}&limit=1000"
     
     all_candles = []
-    
-    # Simple pagination for 2 months
     current_start = start_ts
+    
     while current_start < end_ts:
-        batch_url = f"{url}&startTime={current_start}"
+        # FIX: Append the dynamic startTime here
+        batch_url = f"{base_url}&startTime={current_start}"
+        
         try:
             with urllib.request.urlopen(batch_url) as response:
                 data = json.loads(response.read().decode())
-                if not data: break
                 
+                if not data: 
+                    break
+                
+                # Parse: (Open time, Open, High, Low, Close, Volume, Close time)
+                # We need Close Time (idx 6) and Close Price (idx 4)
                 batch = [(int(c[6]), float(c[4])) for c in data]
                 all_candles.extend(batch)
                 
-                last_time = data[-1][6]
-                if last_time >= end_ts - 1000: break
-                current_start = last_time + 1
+                # Update next start time
+                last_close_time = data[-1][6]
+                
+                if last_close_time >= end_ts - 1000:
+                    break
+                    
+                current_start = last_close_time + 1
+                
+                # Respect rate limits slightly
+                time.sleep(0.1)
+                
+        except urllib.error.HTTPError as e:
+            print(f"[{symbol}] HTTP Error {e.code}: {e.reason} (URL: {batch_url})")
+            break
         except Exception as e:
-            print(f"Binance API Error: {e}")
+            print(f"[{symbol}] Error: {e}")
             break
             
     return all_candles
