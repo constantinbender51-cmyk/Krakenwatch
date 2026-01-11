@@ -42,6 +42,7 @@ TIMEFRAMES = {
 
 # Global State
 SIGNAL_MATRIX = {}
+HISTORY_LOG = []  # Stores last 7 days of signals
 LAST_UPDATE = "Never"
 
 # --- 1. UTILITIES ---
@@ -60,7 +61,6 @@ def deserialize_map(json_map):
     """Converts the JSON-loaded map back to {tuple: Counter(int: int)}"""
     clean_map = {}
     for k, v in json_map.items():
-        # Inner keys must be converted from string "105" to int 105
         int_counter = Counter({int(ik): iv for ik, iv in v.items()})
         clean_map[parse_map_key(k)] = int_counter
     return clean_map
@@ -75,6 +75,15 @@ def resample_prices(raw_data, target_freq):
     df.set_index('timestamp', inplace=True)
     resampled = df['price'].resample(target_freq).last().dropna()
     return resampled.tolist()
+
+def get_resampled_df(raw_data, target_freq):
+    """Returns DataFrame with timestamps for historical mapping"""
+    if not raw_data: return pd.DataFrame()
+    df = pd.DataFrame(raw_data, columns=['timestamp', 'price'])
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df.set_index('timestamp', inplace=True)
+    if target_freq is None: return df
+    return df['price'].resample(target_freq).last().dropna().to_frame()
 
 # --- 2. DATA DOWNLOADERS (FULL HISTORY) ---
 
@@ -107,21 +116,18 @@ def fetch_models_from_github():
                             "all_changes": params["all_changes"]
                         })
                     
-                    # Store expected stats for verification
                     models_cache[asset][tf] = {
                         "strategies": strategies,
                         "expected_acc": file_content.get("combined_accuracy", 0),
                         "expected_trades": file_content.get("combined_trades", 0)
                     }
-                    print(f"[{asset}] Loaded {tf} models (Expected: {file_content.get('combined_accuracy', 0):.1f}% over {file_content.get('combined_trades', 0)} trades).")
+                    print(f"[{asset}] Loaded {tf} models.")
             except Exception as e:
                 print(f"Error downloading {filename}: {e}")
     return models_cache
 
 def get_binance_history(symbol, start_str=START_DATE, end_str=END_DATE):
-    """Fetches FULL history for verification."""
     print(f"[{symbol}] Fetching full history ({start_str} to {end_str})...")
-    
     start_ts = int(datetime.strptime(start_str, "%Y-%m-%d").timestamp() * 1000)
     end_ts = int(datetime.strptime(end_str, "%Y-%m-%d").timestamp() * 1000)
     
@@ -135,25 +141,40 @@ def get_binance_history(symbol, start_str=START_DATE, end_str=END_DATE):
             with urllib.request.urlopen(url) as response:
                 data = json.loads(response.read().decode())
                 if not data: break
-                
                 batch = [(int(c[6]), float(c[4])) for c in data]
                 all_candles.extend(batch)
-                
                 last_time = data[-1][6]
                 if last_time >= end_ts - 1000: break
                 current_start = last_time + 1
-                
-                if len(all_candles) % 50000 == 0:
-                    print(f"[{symbol}] Downloaded {len(all_candles)} candles...")
-                    
         except Exception as e:
             print(f"[{symbol}] Error fetching history: {e}")
             break
-            
-    print(f"[{symbol}] Complete. {len(all_candles)} candles.")
     return all_candles
 
-# --- 3. INFERENCE LOGIC (EXACT REPLICATION) ---
+def get_binance_recent(symbol, days=7):
+    end_ts = int(time.time() * 1000)
+    start_ts = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
+    
+    base_url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={BASE_INTERVAL}&endTime={end_ts}&limit=1000"
+    all_candles = []
+    current_start = start_ts
+    
+    while current_start < end_ts:
+        url = f"{base_url}&startTime={current_start}"
+        try:
+            with urllib.request.urlopen(url) as r:
+                data = json.loads(r.read().decode())
+                if not data: break
+                batch = [(int(c[6]), float(c[4])) for c in data]
+                all_candles.extend(batch)
+                last_time = data[-1][6]
+                if last_time >= end_ts - 1000: break
+                current_start = last_time + 1
+        except:
+            break
+    return all_candles
+
+# --- 3. INFERENCE LOGIC ---
 
 def get_prediction(model_type, abs_map, der_map, a_seq, d_seq, last_val, all_vals, all_changes):
     import random
@@ -178,17 +199,10 @@ def get_prediction(model_type, abs_map, der_map, a_seq, d_seq, last_val, all_val
         return best
     return last_val
 
-def generate_signal(prices, strategies, is_historical_check=False):
-    """
-    For LIVE inference: Takes [Price History], returns signal for NEXT candle.
-    For HISTORICAL check: We iterate differently (handled in run_verification).
-    """
+def generate_signal(prices, strategies):
     if not strategies: return 0
-    
-    # Live inference logic for the very last candle
     active_directions = []
     
-    # We predict the NEXT move based on prices ending at NOW.
     max_seq_len = max(s['seq_len'] for s in strategies)
     if len(prices) < max_seq_len + 1: return 0
 
@@ -196,11 +210,10 @@ def generate_signal(prices, strategies, is_historical_check=False):
         b_size = model['bucket_size']
         seq_len = model['seq_len']
         
-        # We need the last `seq_len` prices to form the input sequence
         relevant_prices = prices[-seq_len:]
         buckets = [get_bucket(p, b_size) for p in relevant_prices]
         
-        a_seq = tuple(buckets) # This is the input sequence
+        a_seq = tuple(buckets) 
         
         if seq_len > 1:
             d_seq = tuple(a_seq[k] - a_seq[k-1] for k in range(1, len(a_seq)))
@@ -230,13 +243,9 @@ def generate_signal(prices, strategies, is_historical_check=False):
     elif down > up: return -1
     return 0
 
-# --- 4. VERIFICATION LOGIC ---
+# --- 4. VERIFICATION & HISTORICAL ANALYSIS ---
 
 def run_strict_verification(models_cache):
-    """
-    Downloads full 2020-2026 data and mimics the 'run_portfolio_analysis' 
-    function from the training script exactly to verify consistency.
-    """
     print("\n========================================")
     print("STARTING STRICT MODEL VERIFICATION (2020-2026)")
     print("========================================")
@@ -244,7 +253,6 @@ def run_strict_verification(models_cache):
     passed_all = True
     
     for asset in ASSETS:
-        # Download FULL history once per asset
         full_raw_data = get_binance_history(asset)
         
         for tf_name, model_data in models_cache[asset].items():
@@ -252,29 +260,20 @@ def run_strict_verification(models_cache):
             exp_acc = model_data['expected_acc']
             exp_trades = model_data['expected_trades']
             
-            # Resample exactly as training script did
             tf_pandas = TIMEFRAMES[tf_name]
             prices = resample_prices(full_raw_data, tf_pandas)
-            
-            # --- REPLICATE TRAINING SCRIPT LOOP ---
-            # Training script: run_portfolio_analysis
             
             max_seq_len = max(s['seq_len'] for s in strategies)
             total_test_len = len(prices) - max_seq_len
             
-            # Optimize buckets for all strategies once
-            # model['buckets'] = [get_bucket(p, size) for p in prices]
             for s in strategies:
                 s['cached_buckets'] = [get_bucket(p, s['bucket_size']) for p in prices]
             
             unique_correct = 0
             unique_total = 0
             
-            # Iterate exactly as training script
             for i in range(total_test_len):
-                curr_raw_idx = i
-                target_idx = curr_raw_idx + max_seq_len
-                
+                target_idx = i + max_seq_len
                 active_directions = []
                 
                 for model in strategies:
@@ -286,38 +285,24 @@ def run_strict_verification(models_cache):
                     
                     if seq_len > 1:
                         d_seq = tuple(a_seq[k] - a_seq[k-1] for k in range(1, len(a_seq)))
-                    else:
-                        d_seq = ()
+                    else: d_seq = ()
                         
                     last_val = a_seq[-1]
                     actual_val = buckets[target_idx]
                     
-                    # Direction of the ACTUAL bucket move
                     diff = actual_val - last_val
                     model_actual_dir = 1 if diff > 0 else (-1 if diff < 0 else 0)
                     
-                    # Prediction
-                    pred_val = get_prediction(
-                        model['config']['model_type'],
-                        model['abs_map'], model['der_map'],
-                        a_seq, d_seq, last_val,
-                        model['all_vals'], model['all_changes']
-                    )
+                    pred_val = get_prediction(model['config']['model_type'], model['abs_map'], model['der_map'],
+                                              a_seq, d_seq, last_val, model['all_vals'], model['all_changes'])
                     
                     pred_diff = pred_val - last_val
                     
                     if pred_diff != 0:
                         direction = 1 if pred_diff > 0 else -1
-                        # Note: Training script logic checked if prediction matched direction
                         is_correct = (direction == model_actual_dir)
-                        # Training script logic also tracked "is_flat"
                         is_flat = (model_actual_dir == 0)
-                        
-                        active_directions.append({
-                            "dir": direction,
-                            "is_correct": is_correct,
-                            "is_flat": is_flat
-                        })
+                        active_directions.append({"dir": direction, "is_correct": is_correct, "is_flat": is_flat})
                 
                 if not active_directions: continue
                 
@@ -334,45 +319,78 @@ def run_strict_verification(models_cache):
                 if all(x['is_flat'] for x in winning_voters): continue
                 
                 unique_total += 1
-                if any(x['is_correct'] for x in winning_voters):
-                    unique_correct += 1
+                if any(x['is_correct'] for x in winning_voters): unique_correct += 1
             
-            # --- COMPARE ---
             calc_acc = (unique_correct / unique_total * 100) if unique_total > 0 else 0
-            
-            # Allow tiny tolerance (0.5%) for potential minor data discrepancies (e.g. specific binance node jitter)
             acc_match = abs(calc_acc - exp_acc) < 0.5
-            trade_match = abs(unique_total - exp_trades) < 5 # Allow +/- 5 trades variance
+            trade_match = abs(unique_total - exp_trades) < 5
             
             status = "PASS" if (acc_match and trade_match) else "FAIL"
             if status == "FAIL": passed_all = False
-            
             print(f"[{status}] {asset} {tf_name} | Calc: {calc_acc:.2f}% ({unique_total}) | Json: {exp_acc:.2f}% ({exp_trades})")
             
     return passed_all
 
-# --- 5. LIVE SERVER ---
+def populate_weekly_history(models_cache):
+    """Iterates last 7 days to build a signal log."""
+    print("\n--- Generating Last 7 Days Signal Log ---")
+    global HISTORY_LOG
+    logs = []
+    
+    for asset in ASSETS:
+        # Get 7 days raw 15m data
+        raw_data = get_binance_recent(asset, days=7)
+        
+        for tf_name, model_data in models_cache.get(asset, {}).items():
+            strategies = model_data['strategies']
+            tf_pandas = TIMEFRAMES[tf_name]
+            
+            # Use DataFrame to get actual timestamps
+            df = get_resampled_df(raw_data, tf_pandas)
+            if df.empty: continue
+            
+            prices = df['price'].tolist()
+            timestamps = df.index.tolist()
+            
+            # Start enough steps in to allow for the longest sequence length
+            max_seq = max(s['seq_len'] for s in strategies)
+            start_idx = max_seq + 1
+            
+            if len(prices) <= start_idx: continue
+            
+            for i in range(start_idx, len(prices)):
+                hist_prices = prices[:i] # Prices *before* the target timestamp
+                current_price = prices[i-1] # The price at the moment of prediction
+                target_ts = timestamps[i]
+                
+                # Signal generated at T-1 for target T
+                sig = generate_signal(hist_prices, strategies)
+                
+                if sig != 0:
+                    logs.append({
+                        "time": target_ts.strftime("%Y-%m-%d %H:%M"),
+                        "asset": asset,
+                        "tf": tf_name,
+                        "signal": "BUY" if sig == 1 else "SELL",
+                        "price_at_signal": current_price
+                    })
+    
+    # Sort by time descending (newest first)
+    logs.sort(key=lambda x: x['time'], reverse=True)
+    HISTORY_LOG = logs
+    print(f"Generated {len(HISTORY_LOG)} historical signals.")
 
-def get_binance_recent(symbol):
-    # Just enough for live inference
-    end_ts = int(time.time() * 1000)
-    start_ts = int((datetime.now() - timedelta(days=5)).timestamp() * 1000)
-    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={BASE_INTERVAL}&startTime={start_ts}&endTime={end_ts}&limit=1000"
-    try:
-        with urllib.request.urlopen(url) as r:
-            data = json.loads(r.read().decode())
-            return [(int(c[6]), float(c[4])) for c in data]
-    except:
-        return []
+# --- 5. LIVE SERVER ---
 
 def update_live_signals(models_cache):
     global SIGNAL_MATRIX, LAST_UPDATE
     print(f"\n[Scheduler] Updating signals at {datetime.now().strftime('%H:%M:%S')}...")
     temp_matrix = {}
     
+    # Update Matrix
     for asset in ASSETS:
         temp_matrix[asset] = {}
-        raw_data = get_binance_recent(asset)
+        raw_data = get_binance_recent(asset, days=5)
         
         for tf_name, model_data in models_cache.get(asset, {}).items():
             strategies = model_data['strategies']
@@ -384,6 +402,10 @@ def update_live_signals(models_cache):
             
     SIGNAL_MATRIX = temp_matrix
     LAST_UPDATE = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Refresh History occasionally (every update is fine for now)
+    populate_weekly_history(models_cache)
+    
     print("[Scheduler] Signals Updated.")
 
 app = Flask(__name__)
@@ -397,17 +419,19 @@ def home():
         <meta http-equiv="refresh" content="60">
         <style>
             body {{ font-family: monospace; background: #111; color: #eee; padding: 20px; }}
-            table {{ border-collapse: collapse; width: 100%; }}
+            table {{ border-collapse: collapse; width: 100%; margin-bottom: 30px; }}
             th, td {{ border: 1px solid #333; padding: 10px; text-align: center; }}
             th {{ background: #222; }}
             .buy {{ background: #004400; color: #0f0; }}
             .sell {{ background: #440000; color: #f00; }}
             .neutral {{ color: #555; }}
+            h2 {{ border-bottom: 1px solid #444; padding-bottom: 5px; margin-top: 40px; }}
         </style>
     </head>
     <body>
         <h1>Live Signal Matrix</h1>
         <p>Last Update: {LAST_UPDATE}</p>
+        
         <table>
             <thead>
                 <tr>
@@ -433,6 +457,37 @@ def home():
             row += f"<td class='{cls}'>{txt}</td>"
         row += "</tr>"
         html += row
+        
+    html += """
+            </tbody>
+        </table>
+        
+        <h2>Signals (Last 7 Days)</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Time</th>
+                    <th>Asset</th>
+                    <th>Timeframe</th>
+                    <th>Signal</th>
+                    <th>Price @ Sig</th>
+                </tr>
+            </thead>
+            <tbody>
+    """
+    
+    for log in HISTORY_LOG[:100]: # Show last 100 signals
+        cls = "buy" if log['signal'] == "BUY" else "sell"
+        html += f"""
+        <tr>
+            <td>{log['time']}</td>
+            <td>{log['asset']}</td>
+            <td>{log['tf']}</td>
+            <td class='{cls}'>{log['signal']}</td>
+            <td>{log['price_at_signal']:.4f}</td>
+        </tr>
+        """
+        
     html += "</tbody></table></body></html>"
     return render_template_string(html)
 
@@ -455,13 +510,15 @@ if __name__ == "__main__":
     if run_strict_verification(models):
         print("\n>>> VERIFICATION SUCCESSFUL. STARTING LIVE SERVER. <<<")
         
-        # 3. Start Scheduler
+        # 3. Populate History Initial
+        populate_weekly_history(models)
+        
+        # 4. Start Scheduler
         t = threading.Thread(target=run_scheduler, args=(models,))
         t.daemon = True
         t.start()
         
-        # 4. Start Server
+        # 5. Start Server
         app.run(host='0.0.0.0', port=8080)
     else:
         print("\n>>> VERIFICATION FAILED. SERVER WILL NOT START. <<<")
-        print("Check data consistency or model version.")
