@@ -397,6 +397,12 @@ def update_live_signals(models_cache):
             tf_pandas = TIMEFRAMES[tf_name]
             prices = resample_prices(raw_data, tf_pandas)
             
+            # CRITICAL FIX: Drop the last price bucket.
+            # This bucket contains data from the currently forming candle (which is incomplete).
+            # We only want to generate signals based on fully completed candles.
+            if prices:
+                prices = prices[:-1]
+            
             sig = generate_signal(prices, strategies)
             temp_matrix[asset][tf_name] = sig
             
