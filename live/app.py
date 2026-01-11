@@ -151,7 +151,11 @@ def get_binance_history(symbol, start_str=START_DATE, end_str=END_DATE):
             break
     return all_candles
 
-def get_binance_recent(symbol, days=7):
+def get_binance_recent(symbol, days=20):
+    """
+    Fetches 20 days of data to ensure 1D models have enough history 
+    (sequence length) to function, even if we only display 7 days.
+    """
     end_ts = int(time.time() * 1000)
     start_ts = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
     
@@ -332,14 +336,16 @@ def run_strict_verification(models_cache):
     return passed_all
 
 def populate_weekly_history(models_cache):
-    """Iterates last 10 days to build a signal log, IGNORING incomplete candles."""
+    """Iterates 20 days of data for calculation, but filters logs to last 7 days."""
     print("\n--- Generating Signal Log ---")
     global HISTORY_LOG
     logs = []
     
+    cutoff_time = datetime.now() - timedelta(days=7)
+    
     for asset in ASSETS:
-        # Get 10 days raw 15m data (Safe buffer)
-        raw_data = get_binance_recent(asset, days=10)
+        # Get 20 days raw 15m data (Safe buffer for 1D models)
+        raw_data = get_binance_recent(asset, days=20)
         
         for tf_name, model_data in models_cache.get(asset, {}).items():
             strategies = model_data['strategies']
@@ -356,15 +362,17 @@ def populate_weekly_history(models_cache):
             max_seq = max(s['seq_len'] for s in strategies)
             start_idx = max_seq + 1
             
-            # CRITICAL FIX: The range must end at len(prices) - 1.
-            # The last item in 'prices' is the current, incomplete candle (forming).
-            # We must NOT generate a log entry for it, as the price (and bucket) will shift.
+            # 1. LOOP RANGE FIX: Stop at len(prices) - 1 to ignore the forming candle
             if len(prices) <= start_idx: continue
             
             for i in range(start_idx, len(prices) - 1): 
                 hist_prices = prices[:i] # Prices *before* the target timestamp
                 current_price = prices[i-1] # The price at the moment of prediction
                 target_ts = timestamps[i] # The "Future" time we are predicting for
+                
+                # 2. FILTER: Only add to log if within last 7 days
+                if target_ts < cutoff_time:
+                    continue
                 
                 # Signal generated at T-1 for target T
                 sig = generate_signal(hist_prices, strategies)
@@ -393,16 +401,15 @@ def update_live_signals(models_cache):
     # Update Matrix
     for asset in ASSETS:
         temp_matrix[asset] = {}
-        # FIX: 10 days is a safe buffer
-        raw_data = get_binance_recent(asset, days=10)
+        # Fetch 20 days so 1D models have enough history
+        raw_data = get_binance_recent(asset, days=20)
         
         for tf_name, model_data in models_cache.get(asset, {}).items():
             strategies = model_data['strategies']
             tf_pandas = TIMEFRAMES[tf_name]
             prices = resample_prices(raw_data, tf_pandas)
             
-            # CRITICAL FIX: Drop the last price bucket.
-            # This bucket contains data from the currently forming candle (which is incomplete).
+            # CRITICAL FIX: Drop the last price bucket (forming candle).
             if prices:
                 prices = prices[:-1]
             
@@ -471,7 +478,7 @@ def home():
             </tbody>
         </table>
         
-        <h2>Signals (Last 10 Days)</h2>
+        <h2>Signals (Last 7 Days)</h2>
         <table>
             <thead>
                 <tr>
