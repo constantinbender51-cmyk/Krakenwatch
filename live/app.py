@@ -17,17 +17,20 @@ try:
 except ImportError:
     pass
 
-# GitHub Config
-GITHUB_PAT = os.getenv("PAT") # Ensure this is in your .env file
+GITHUB_PAT = os.getenv("PAT")
 REPO_OWNER = "constantinbender51-cmyk"
 REPO_NAME = "Models"
 GITHUB_API_URL = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/"
 
-# Binance Config
 ASSETS = [
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", 
     "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT"
 ]
+
+# Validation Dates (Must match Training Script)
+START_DATE = "2020-01-01"
+END_DATE = "2026-01-01"
+
 BASE_INTERVAL = "15m"
 TIMEFRAMES = {
     "15m": None,
@@ -37,8 +40,8 @@ TIMEFRAMES = {
     "1d": "1D"
 }
 
-# Global State for Server
-SIGNAL_MATRIX = {} # { "BTCUSDT": { "15m": 1, "60m": 0, ... }, ... }
+# Global State
+SIGNAL_MATRIX = {}
 LAST_UPDATE = "Never"
 
 # --- 1. UTILITIES ---
@@ -48,7 +51,6 @@ def get_bucket(price, bucket_size):
     return int(price // bucket_size)
 
 def parse_map_key(key_str):
-    """Converts JSON string key '1|2|3' back to tuple (1, 2, 3)"""
     try:
         return tuple(map(int, key_str.split('|')))
     except:
@@ -58,17 +60,12 @@ def deserialize_map(json_map):
     """Converts the JSON-loaded map back to {tuple: Counter(int: int)}"""
     clean_map = {}
     for k, v in json_map.items():
-        # k is "1|2|3" -> converted to tuple (1, 2, 3)
-        # v is {"105": 5} -> keys are strings from JSON, must be converted to int
-        
-        # FIX: Convert inner dict keys from string to int
-        int_counter = Counter({int(inner_k): inner_v for inner_k, inner_v in v.items()})
-        
+        # Inner keys must be converted from string "105" to int 105
+        int_counter = Counter({int(ik): iv for ik, iv in v.items()})
         clean_map[parse_map_key(k)] = int_counter
     return clean_map
 
 def resample_prices(raw_data, target_freq):
-    """Resamples (Close_Time, Price) tuples to target frequency."""
     if not raw_data: return []
     if target_freq is None:
         return [x[1] for x in raw_data]
@@ -76,18 +73,14 @@ def resample_prices(raw_data, target_freq):
     df = pd.DataFrame(raw_data, columns=['timestamp', 'price'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     df.set_index('timestamp', inplace=True)
-    
-    # Resample and forward fill or drop na
     resampled = df['price'].resample(target_freq).last().dropna()
     return resampled.tolist()
 
-# --- 2. DATA DOWNLOADERS ---
+# --- 2. DATA DOWNLOADERS (FULL HISTORY) ---
 
 def fetch_models_from_github():
-    """Downloads all strategy JSON files from the repo."""
     print("--- Downloading Strategies from GitHub ---")
     headers = {"Authorization": f"Bearer {GITHUB_PAT}"} if GITHUB_PAT else {}
-    
     models_cache = {}
     
     for asset in ASSETS:
@@ -95,15 +88,12 @@ def fetch_models_from_github():
         for tf in TIMEFRAMES.keys():
             filename = f"{asset}_{tf}.json"
             url = GITHUB_API_URL + filename
-            
             try:
-                # Get file metadata to find download URL
                 resp = requests.get(url, headers=headers)
                 if resp.status_code == 200:
                     download_url = resp.json().get("download_url")
                     file_content = requests.get(download_url).json()
                     
-                    # Deserialize immediately
                     strategies = []
                     for s in file_content.get("strategy_union", []):
                         params = s["trained_parameters"]
@@ -117,68 +107,56 @@ def fetch_models_from_github():
                             "all_changes": params["all_changes"]
                         })
                     
-                    models_cache[asset][tf] = strategies
-                    print(f"[{asset}] Loaded {tf} models.")
-                else:
-                    print(f"[{asset}] No model found for {tf} (Status {resp.status_code})")
+                    # Store expected stats for verification
+                    models_cache[asset][tf] = {
+                        "strategies": strategies,
+                        "expected_acc": file_content.get("combined_accuracy", 0),
+                        "expected_trades": file_content.get("combined_trades", 0)
+                    }
+                    print(f"[{asset}] Loaded {tf} models (Expected: {file_content.get('combined_accuracy', 0):.1f}% over {file_content.get('combined_trades', 0)} trades).")
             except Exception as e:
                 print(f"Error downloading {filename}: {e}")
-                
     return models_cache
 
-def get_binance_recent_data(symbol, days=60):
-    """Fetches last N days of 15m data."""
-    end_ts = int(time.time() * 1000)
-    start_ts = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
+def get_binance_history(symbol, start_str=START_DATE, end_str=END_DATE):
+    """Fetches FULL history for verification."""
+    print(f"[{symbol}] Fetching full history ({start_str} to {end_str})...")
     
-    # FIX: Do not include startTime in the base URL
-    base_url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={BASE_INTERVAL}&endTime={end_ts}&limit=1000"
+    start_ts = int(datetime.strptime(start_str, "%Y-%m-%d").timestamp() * 1000)
+    end_ts = int(datetime.strptime(end_str, "%Y-%m-%d").timestamp() * 1000)
     
+    base_url = "https://api.binance.com/api/v3/klines"
     all_candles = []
     current_start = start_ts
     
     while current_start < end_ts:
-        # FIX: Append the dynamic startTime here
-        batch_url = f"{base_url}&startTime={current_start}"
-        
+        url = f"{base_url}?symbol={symbol}&interval={BASE_INTERVAL}&startTime={current_start}&endTime={end_ts}&limit=1000"
         try:
-            with urllib.request.urlopen(batch_url) as response:
+            with urllib.request.urlopen(url) as response:
                 data = json.loads(response.read().decode())
+                if not data: break
                 
-                if not data: 
-                    break
-                
-                # Parse: (Open time, Open, High, Low, Close, Volume, Close time)
-                # We need Close Time (idx 6) and Close Price (idx 4)
                 batch = [(int(c[6]), float(c[4])) for c in data]
                 all_candles.extend(batch)
                 
-                # Update next start time
-                last_close_time = data[-1][6]
+                last_time = data[-1][6]
+                if last_time >= end_ts - 1000: break
+                current_start = last_time + 1
                 
-                if last_close_time >= end_ts - 1000:
-                    break
+                if len(all_candles) % 50000 == 0:
+                    print(f"[{symbol}] Downloaded {len(all_candles)} candles...")
                     
-                current_start = last_close_time + 1
-                
-                # Respect rate limits slightly
-                time.sleep(0.1)
-                
-        except urllib.error.HTTPError as e:
-            print(f"[{symbol}] HTTP Error {e.code}: {e.reason} (URL: {batch_url})")
-            break
         except Exception as e:
-            print(f"[{symbol}] Error: {e}")
+            print(f"[{symbol}] Error fetching history: {e}")
             break
             
+    print(f"[{symbol}] Complete. {len(all_candles)} candles.")
     return all_candles
 
-# --- 3. INFERENCE ENGINE ---
+# --- 3. INFERENCE LOGIC (EXACT REPLICATION) ---
 
 def get_prediction(model_type, abs_map, der_map, a_seq, d_seq, last_val, all_vals, all_changes):
-    """Replicates the prediction logic from the training script."""
     import random
-    
     if model_type == "Absolute":
         if a_seq in abs_map: return abs_map[a_seq].most_common(1)[0][0]
         return random.choice(all_vals)
@@ -193,7 +171,6 @@ def get_prediction(model_type, abs_map, der_map, a_seq, d_seq, last_val, all_val
         for c in der_cand.keys(): poss.add(last_val + c)
         
         if not poss: return random.choice(all_vals)
-        
         best, max_s = None, -1
         for v in poss:
             s = abs_cand[v] + der_cand[v - last_val]
@@ -201,17 +178,17 @@ def get_prediction(model_type, abs_map, der_map, a_seq, d_seq, last_val, all_val
         return best
     return last_val
 
-def generate_signal(prices, strategies):
+def generate_signal(prices, strategies, is_historical_check=False):
     """
-    Takes a price list and a list of strategies (committee).
-    Returns 1 (Buy), -1 (Sell), 0 (Neutral).
+    For LIVE inference: Takes [Price History], returns signal for NEXT candle.
+    For HISTORICAL check: We iterate differently (handled in run_verification).
     """
-    if not strategies or len(prices) < 50: return 0
-
+    if not strategies: return 0
+    
+    # Live inference logic for the very last candle
     active_directions = []
     
-    # We only predict the NEXT move based on the LATEST data
-    # We need the max seq_len to ensure we have enough data
+    # We predict the NEXT move based on prices ending at NOW.
     max_seq_len = max(s['seq_len'] for s in strategies)
     if len(prices) < max_seq_len + 1: return 0
 
@@ -219,15 +196,11 @@ def generate_signal(prices, strategies):
         b_size = model['bucket_size']
         seq_len = model['seq_len']
         
-        # Bucketize recent history only
-        relevant_prices = prices[-(seq_len+1):]
+        # We need the last `seq_len` prices to form the input sequence
+        relevant_prices = prices[-seq_len:]
         buckets = [get_bucket(p, b_size) for p in relevant_prices]
         
-        # Current state sequence
-        a_seq = tuple(buckets[:-1]) # Input sequence (excluding current "bucket" if we were training, but for inference we use up to NOW)
-        # Actually, to predict TOMORROW, we use data up to TODAY.
-        # So input sequence is buckets[-(seq_len):]
-        a_seq = tuple(buckets[-seq_len:])
+        a_seq = tuple(buckets) # This is the input sequence
         
         if seq_len > 1:
             d_seq = tuple(a_seq[k] - a_seq[k-1] for k in range(1, len(a_seq)))
@@ -244,93 +217,174 @@ def generate_signal(prices, strategies):
         )
         
         pred_diff = pred_val - last_val
-        
         if pred_diff != 0:
             direction = 1 if pred_diff > 0 else -1
             active_directions.append(direction)
             
     if not active_directions: return 0
     
-    up_votes = active_directions.count(1)
-    down_votes = active_directions.count(-1)
+    up = active_directions.count(1)
+    down = active_directions.count(-1)
     
-    if up_votes > down_votes: return 1
-    elif down_votes > up_votes: return -1
+    if up > down: return 1
+    elif down > up: return -1
     return 0
 
-# --- 4. BACKTESTING & LIVE LOOP ---
+# --- 4. VERIFICATION LOGIC ---
 
-def run_backtest(models_cache):
-    """Runs a backtest on the downloaded data (Last 6 Months)."""
-    print("\n--- Starting Backtest (Last 6 Months) ---")
-    results = {}
+def run_strict_verification(models_cache):
+    """
+    Downloads full 2020-2026 data and mimics the 'run_portfolio_analysis' 
+    function from the training script exactly to verify consistency.
+    """
+    print("\n========================================")
+    print("STARTING STRICT MODEL VERIFICATION (2020-2026)")
+    print("========================================")
+    
+    passed_all = True
     
     for asset in ASSETS:
-        # CHANGED: Fetch 180 days (6 months) instead of 60
-        raw_data = get_binance_recent_data(asset, days=180)
-        results[asset] = {}
+        # Download FULL history once per asset
+        full_raw_data = get_binance_history(asset)
         
-        for tf_name, tf_pandas in TIMEFRAMES.items():
-            if tf_name not in models_cache[asset]: continue
+        for tf_name, model_data in models_cache[asset].items():
+            strategies = model_data['strategies']
+            exp_acc = model_data['expected_acc']
+            exp_trades = model_data['expected_trades']
             
-            strategies = models_cache[asset][tf_name]
-            prices = resample_prices(raw_data, tf_pandas)
+            # Resample exactly as training script did
+            tf_pandas = TIMEFRAMES[tf_name]
+            prices = resample_prices(full_raw_data, tf_pandas)
             
-            # Simulate walking forward
-            trades = 0
-            wins = 0
+            # --- REPLICATE TRAINING SCRIPT LOOP ---
+            # Training script: run_portfolio_analysis
             
-            # Start half-way through data to ensure we have enough history for the longest sequence
-            # For 6 months of data, this still leaves 3 months of pure testing
-            start_idx = len(prices) // 2 
+            max_seq_len = max(s['seq_len'] for s in strategies)
+            total_test_len = len(prices) - max_seq_len
             
-            for i in range(start_idx, len(prices)-1):
-                # Historical context up to i
-                hist_prices = prices[:i+1]
+            # Optimize buckets for all strategies once
+            # model['buckets'] = [get_bucket(p, size) for p in prices]
+            for s in strategies:
+                s['cached_buckets'] = [get_bucket(p, s['bucket_size']) for p in prices]
+            
+            unique_correct = 0
+            unique_total = 0
+            
+            # Iterate exactly as training script
+            for i in range(total_test_len):
+                curr_raw_idx = i
+                target_idx = curr_raw_idx + max_seq_len
                 
-                sig = generate_signal(hist_prices, strategies)
+                active_directions = []
                 
-                if sig != 0:
-                    trades += 1
-                    # Did price move in that direction?
-                    actual_move = prices[i+1] - prices[i]
-                    if (sig == 1 and actual_move > 0) or (sig == -1 and actual_move < 0):
-                        wins += 1
+                for model in strategies:
+                    seq_len = model['seq_len']
+                    buckets = model['cached_buckets']
+                    
+                    start_seq_idx = target_idx - seq_len
+                    a_seq = tuple(buckets[start_seq_idx : target_idx])
+                    
+                    if seq_len > 1:
+                        d_seq = tuple(a_seq[k] - a_seq[k-1] for k in range(1, len(a_seq)))
+                    else:
+                        d_seq = ()
                         
-            win_rate = (wins/trades*100) if trades > 0 else 0
-            results[asset][tf_name] = f"{win_rate:.1f}% ({trades} trds)"
-            print(f"Backtest {asset} {tf_name}: {win_rate:.1f}% Win Rate over {trades} trades")
+                    last_val = a_seq[-1]
+                    actual_val = buckets[target_idx]
+                    
+                    # Direction of the ACTUAL bucket move
+                    diff = actual_val - last_val
+                    model_actual_dir = 1 if diff > 0 else (-1 if diff < 0 else 0)
+                    
+                    # Prediction
+                    pred_val = get_prediction(
+                        model['config']['model_type'],
+                        model['abs_map'], model['der_map'],
+                        a_seq, d_seq, last_val,
+                        model['all_vals'], model['all_changes']
+                    )
+                    
+                    pred_diff = pred_val - last_val
+                    
+                    if pred_diff != 0:
+                        direction = 1 if pred_diff > 0 else -1
+                        # Note: Training script logic checked if prediction matched direction
+                        is_correct = (direction == model_actual_dir)
+                        # Training script logic also tracked "is_flat"
+                        is_flat = (model_actual_dir == 0)
+                        
+                        active_directions.append({
+                            "dir": direction,
+                            "is_correct": is_correct,
+                            "is_flat": is_flat
+                        })
+                
+                if not active_directions: continue
+                
+                dirs = [x['dir'] for x in active_directions]
+                up_votes = dirs.count(1)
+                down_votes = dirs.count(-1)
+                
+                final_dir = 0
+                if up_votes > down_votes: final_dir = 1
+                elif down_votes > up_votes: final_dir = -1
+                else: continue
+                
+                winning_voters = [x for x in active_directions if x['dir'] == final_dir]
+                if all(x['is_flat'] for x in winning_voters): continue
+                
+                unique_total += 1
+                if any(x['is_correct'] for x in winning_voters):
+                    unique_correct += 1
             
-    return results
+            # --- COMPARE ---
+            calc_acc = (unique_correct / unique_total * 100) if unique_total > 0 else 0
+            
+            # Allow tiny tolerance (0.5%) for potential minor data discrepancies (e.g. specific binance node jitter)
+            acc_match = abs(calc_acc - exp_acc) < 0.5
+            trade_match = abs(unique_total - exp_trades) < 5 # Allow +/- 5 trades variance
+            
+            status = "PASS" if (acc_match and trade_match) else "FAIL"
+            if status == "FAIL": passed_all = False
+            
+            print(f"[{status}] {asset} {tf_name} | Calc: {calc_acc:.2f}% ({unique_total}) | Json: {exp_acc:.2f}% ({exp_trades})")
+            
+    return passed_all
+
+# --- 5. LIVE SERVER ---
+
+def get_binance_recent(symbol):
+    # Just enough for live inference
+    end_ts = int(time.time() * 1000)
+    start_ts = int((datetime.now() - timedelta(days=5)).timestamp() * 1000)
+    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={BASE_INTERVAL}&startTime={start_ts}&endTime={end_ts}&limit=1000"
+    try:
+        with urllib.request.urlopen(url) as r:
+            data = json.loads(r.read().decode())
+            return [(int(c[6]), float(c[4])) for c in data]
+    except:
+        return []
 
 def update_live_signals(models_cache):
     global SIGNAL_MATRIX, LAST_UPDATE
-    print(f"\n[Scheduler] Updating signals at {datetime.now().strftime('%H:%M')}...")
-    
+    print(f"\n[Scheduler] Updating signals at {datetime.now().strftime('%H:%M:%S')}...")
     temp_matrix = {}
     
     for asset in ASSETS:
         temp_matrix[asset] = {}
-        # Fetch fresh data (just last 2 days is enough for inference)
-        raw_data = get_binance_recent_data(asset, days=5) 
+        raw_data = get_binance_recent(asset)
         
-        for tf_name, tf_pandas in TIMEFRAMES.items():
-            if tf_name not in models_cache.get(asset, {}): 
-                temp_matrix[asset][tf_name] = "N/A"
-                continue
-                
+        for tf_name, model_data in models_cache.get(asset, {}).items():
+            strategies = model_data['strategies']
+            tf_pandas = TIMEFRAMES[tf_name]
             prices = resample_prices(raw_data, tf_pandas)
-            strategies = models_cache[asset][tf_name]
             
-            # Generate Signal on LATEST data
             sig = generate_signal(prices, strategies)
             temp_matrix[asset][tf_name] = sig
             
     SIGNAL_MATRIX = temp_matrix
     LAST_UPDATE = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print("[Scheduler] Signals Updated.")
-
-# --- 5. FLASK SERVER ---
 
 app = Flask(__name__)
 
@@ -363,7 +417,6 @@ def home():
             </thead>
             <tbody>
     """
-    
     for asset in ASSETS:
         row = f"<tr><td>{asset}</td>"
         signals = SIGNAL_MATRIX.get(asset, {})
@@ -377,41 +430,19 @@ def home():
             elif val == -1: 
                 cls = "sell"
                 txt = "SELL"
-            elif val == "N/A":
-                txt = "-"
-                
             row += f"<td class='{cls}'>{txt}</td>"
         row += "</tr>"
         html += row
-        
-    html += """
-            </tbody>
-        </table>
-    </body>
-    </html>
-    """
+    html += "</tbody></table></body></html>"
     return render_template_string(html)
 
-@app.route('/json')
-def json_api():
-    return jsonify({"timestamp": LAST_UPDATE, "signals": SIGNAL_MATRIX})
-
-# --- MAIN ENTRY ---
-
 def run_scheduler(models_cache):
-    # Initial run immediately so you don't wait for the first quarter hour
-    print("Running initial update...")
+    print("Initializing Live Scheduler...")
     update_live_signals(models_cache)
-    
-    # Schedule strict clock alignments
-    # Note: We run these for every hour
     schedule.every().hour.at(":00").do(update_live_signals, models_cache)
     schedule.every().hour.at(":15").do(update_live_signals, models_cache)
     schedule.every().hour.at(":30").do(update_live_signals, models_cache)
     schedule.every().hour.at(":45").do(update_live_signals, models_cache)
-    
-    print("[Scheduler] Aligned to clock marks: :00, :15, :30, :45")
-    
     while True:
         schedule.run_pending()
         time.sleep(1)
@@ -420,15 +451,17 @@ if __name__ == "__main__":
     # 1. Download Models
     models = fetch_models_from_github()
     
-    # 2. Run Backtest (Optional, runs once on startup)
-    run_backtest(models)
-    
-    # 3. Start Scheduler in Background Thread
-    t = threading.Thread(target=run_scheduler, args=(models,))
-    t.daemon = True
-    t.start()
-    
-    # 4. Start Web Server
-    print("Starting Web Server on port 8080...")
-    app.run(host='0.0.0.0', port=8080)
-              
+    # 2. Strict Verification
+    if run_strict_verification(models):
+        print("\n>>> VERIFICATION SUCCESSFUL. STARTING LIVE SERVER. <<<")
+        
+        # 3. Start Scheduler
+        t = threading.Thread(target=run_scheduler, args=(models,))
+        t.daemon = True
+        t.start()
+        
+        # 4. Start Server
+        app.run(host='0.0.0.0', port=8080)
+    else:
+        print("\n>>> VERIFICATION FAILED. SERVER WILL NOT START. <<<")
+        print("Check data consistency or model version.")
