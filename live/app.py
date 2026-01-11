@@ -261,12 +261,13 @@ def generate_signal(prices, strategies):
 # --- 4. BACKTESTING & LIVE LOOP ---
 
 def run_backtest(models_cache):
-    """Runs a quick backtest on the downloaded data."""
-    print("\n--- Starting Backtest (Last 60 Days) ---")
+    """Runs a backtest on the downloaded data (Last 6 Months)."""
+    print("\n--- Starting Backtest (Last 6 Months) ---")
     results = {}
     
     for asset in ASSETS:
-        raw_data = get_binance_recent_data(asset, days=60)
+        # CHANGED: Fetch 180 days (6 months) instead of 60
+        raw_data = get_binance_recent_data(asset, days=180)
         results[asset] = {}
         
         for tf_name, tf_pandas in TIMEFRAMES.items():
@@ -276,11 +277,11 @@ def run_backtest(models_cache):
             prices = resample_prices(raw_data, tf_pandas)
             
             # Simulate walking forward
-            balance = 0
             trades = 0
             wins = 0
             
-            # Start half-way through data to save time
+            # Start half-way through data to ensure we have enough history for the longest sequence
+            # For 6 months of data, this still leaves 3 months of pure testing
             start_idx = len(prices) // 2 
             
             for i in range(start_idx, len(prices)-1):
