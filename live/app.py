@@ -356,15 +356,15 @@ def populate_weekly_history(models_cache):
             max_seq = max(s['seq_len'] for s in strategies)
             start_idx = max_seq + 1
             
-            # FIX: Iterate only up to len(prices) - 1
-            # We must ignore the very last bucket because it is likely incomplete/forming.
-            # This matches the Logic in update_live_signals.
+            # CRITICAL FIX: The range must end at len(prices) - 1.
+            # The last item in 'prices' is the current, incomplete candle (forming).
+            # We must NOT generate a log entry for it, as the price (and bucket) will shift.
             if len(prices) <= start_idx: continue
             
-            for i in range(start_idx, len(prices)): 
+            for i in range(start_idx, len(prices) - 1): 
                 hist_prices = prices[:i] # Prices *before* the target timestamp
                 current_price = prices[i-1] # The price at the moment of prediction
-                target_ts = timestamps[i] # The "Future" time we are predicting for (but currently in)
+                target_ts = timestamps[i] # The "Future" time we are predicting for
                 
                 # Signal generated at T-1 for target T
                 sig = generate_signal(hist_prices, strategies)
@@ -393,7 +393,7 @@ def update_live_signals(models_cache):
     # Update Matrix
     for asset in ASSETS:
         temp_matrix[asset] = {}
-        # FIX: 10 days is a safe buffer for 4H candles (60 candles)
+        # FIX: 10 days is a safe buffer
         raw_data = get_binance_recent(asset, days=10)
         
         for tf_name, model_data in models_cache.get(asset, {}).items():
@@ -403,7 +403,6 @@ def update_live_signals(models_cache):
             
             # CRITICAL FIX: Drop the last price bucket.
             # This bucket contains data from the currently forming candle (which is incomplete).
-            # We only want to generate signals based on fully completed candles.
             if prices:
                 prices = prices[:-1]
             
@@ -413,7 +412,7 @@ def update_live_signals(models_cache):
     SIGNAL_MATRIX = temp_matrix
     LAST_UPDATE = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    # Refresh History occasionally (every update is fine for now)
+    # Refresh History occasionally
     populate_weekly_history(models_cache)
     
     print("[Scheduler] Signals Updated.")
