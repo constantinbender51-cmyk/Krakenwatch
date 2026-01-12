@@ -12,6 +12,17 @@ from datetime import datetime, timedelta
 from collections import Counter
 from flask import Flask, jsonify, render_template_string
 
+# --- DATABASE IMPORTS ---
+try:
+    from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime
+    from sqlalchemy.orm import sessionmaker, declarative_base
+    from sqlalchemy.sql import text
+except ImportError:
+    print("Warning: SQLAlchemy not found. DB features will be disabled.")
+    # Dummy classes to prevent crash if libs missing
+    class BaseDummy: metadata = type('obj', (object,), {'create_all': lambda x: None})
+    declarative_base = lambda: BaseDummy
+
 # --- CONFIGURATION ---
 try:
     from dotenv import load_dotenv
@@ -46,6 +57,51 @@ SIGNAL_MATRIX = {}
 HISTORY_LOG = []
 HISTORY_ACCURACY = 0.0
 LAST_UPDATE = "Never"
+
+# --- 0. DATABASE SETUP ---
+DATABASE_URL = os.getenv("DATABASE_URL")
+SessionLocal = None
+Base = declarative_base()
+
+if DATABASE_URL:
+    # Fix for Railway/Heroku postgres:// vs postgresql://
+    if DATABASE_URL.startswith("postgres://"):
+        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+    
+    try:
+        engine = create_engine(DATABASE_URL)
+        SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+        print(">>> Database connection established.")
+    except Exception as e:
+        print(f">>> Database connection failed: {e}")
+        DATABASE_URL = None
+
+# Define Models
+class HistoryEntry(Base):
+    __tablename__ = 'signal_history'
+    id = Column(Integer, primary_key=True, index=True)
+    time_str = Column(String) # Stored as string to match existing format
+    asset = Column(String)
+    tf = Column(String)
+    signal = Column(String)
+    price_at_signal = Column(Float)
+    outcome = Column(String)
+    close_price = Column(Float)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+class MatrixEntry(Base):
+    __tablename__ = 'live_matrix'
+    asset = Column(String, primary_key=True)
+    tf = Column(String, primary_key=True)
+    signal_val = Column(Integer) # 1, -1, 0
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+# Create Tables
+if DATABASE_URL and engine:
+    try:
+        Base.metadata.create_all(bind=engine)
+    except Exception as e:
+        print(f">>> Error creating tables: {e}")
 
 # --- 1. UTILITIES ---
 
@@ -389,8 +445,6 @@ def populate_weekly_history(models_cache):
             strategies = model_data['strategies']
             tf_pandas = TIMEFRAMES[tf_name]
             
-            # Identify the smallest bucket size used in this timeframe (High Sensitivity)
-            # We use this to determine if the price moved "enough"
             min_bucket_size = min(s['bucket_size'] for s in strategies)
             
             df = get_resampled_df(raw_data, tf_pandas)
@@ -417,24 +471,19 @@ def populate_weekly_history(models_cache):
                 sig = generate_signal(hist_prices, strategies)
                 
                 if sig != 0:
-                    # STRICT VERIFICATION: Did it move a full bucket?
                     start_bucket = get_bucket(current_price, min_bucket_size)
                     end_bucket = get_bucket(outcome_price, min_bucket_size)
                     bucket_diff = end_bucket - start_bucket
                     
                     outcome_str = "NOISE"
                     
-                    if sig == 1: # Predicted UP
+                    if sig == 1:
                         if bucket_diff > 0: outcome_str = "WIN"
                         elif bucket_diff < 0: outcome_str = "LOSS"
-                        # else bucket_diff == 0 -> NOISE
-                        
-                    elif sig == -1: # Predicted DOWN
+                    elif sig == -1:
                         if bucket_diff < 0: outcome_str = "WIN"
                         elif bucket_diff > 0: outcome_str = "LOSS"
-                        # else bucket_diff == 0 -> NOISE
                     
-                    # Update Stats (Exclude Noise from Accuracy)
                     if outcome_str == "WIN":
                         total_wins += 1
                         total_valid_moves += 1
@@ -459,7 +508,30 @@ def populate_weekly_history(models_cache):
     else:
         HISTORY_ACCURACY = 0.0
         
-    print(f"Generated {len(HISTORY_LOG)} signals. Strict Accuracy: {HISTORY_ACCURACY:.2f}% (Moves: {total_valid_moves})")
+    print(f"Generated {len(HISTORY_LOG)} signals. Strict Accuracy: {HISTORY_ACCURACY:.2f}%")
+
+    # --- SAVE TO DB ---
+    if SessionLocal:
+        try:
+            session = SessionLocal()
+            # We clear old history and replace with re-verified history to ensure outcome status is fresh
+            session.query(HistoryEntry).delete()
+            for log in logs:
+                entry = HistoryEntry(
+                    time_str=log['time'],
+                    asset=log['asset'],
+                    tf=log['tf'],
+                    signal=log['signal'],
+                    price_at_signal=log['price_at_signal'],
+                    outcome=log['outcome'],
+                    close_price=log['close_price']
+                )
+                session.add(entry)
+            session.commit()
+            session.close()
+            print("[DB] Signal History saved to Database.")
+        except Exception as e:
+            print(f"[DB Error] Could not save history: {e}")
 
 # --- 5. LIVE SERVER ---
 
@@ -485,6 +557,26 @@ def update_live_signals(models_cache):
             
     SIGNAL_MATRIX = temp_matrix
     LAST_UPDATE = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # --- SAVE MATRIX TO DB ---
+    if SessionLocal:
+        try:
+            session = SessionLocal()
+            # Upsert or clear/insert logic. Clear/Insert is cleaner for full snapshot.
+            session.query(MatrixEntry).delete()
+            for asset, tfs in temp_matrix.items():
+                for tf, val in tfs.items():
+                    entry = MatrixEntry(
+                        asset=asset,
+                        tf=tf,
+                        signal_val=val
+                    )
+                    session.add(entry)
+            session.commit()
+            session.close()
+            print("[DB] Live Signal Matrix saved to Database.")
+        except Exception as e:
+            print(f"[DB Error] Could not save matrix: {e}")
     
     populate_weekly_history(models_cache)
     print("[Scheduler] Signals Updated.")
