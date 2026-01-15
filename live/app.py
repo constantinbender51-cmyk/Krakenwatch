@@ -11,7 +11,6 @@ from io import StringIO
 from datetime import datetime, timedelta
 from collections import Counter
 from flask import Flask, jsonify, render_template_string
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # --- DATABASE IMPORTS ---
 try:
@@ -20,6 +19,7 @@ try:
     from sqlalchemy.sql import text
 except ImportError:
     print("Warning: SQLAlchemy not found. DB features will be disabled.")
+    # Dummy classes to prevent crash if libs missing
     class BaseDummy: metadata = type('obj', (object,), {'create_all': lambda x: None})
     declarative_base = lambda: BaseDummy
 
@@ -35,6 +35,7 @@ REPO_OWNER = "constantinbender51-cmyk"
 REPO_NAME = "Models"
 GITHUB_API_BASE = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/"
 
+# UPDATED ASSETS LIST (Matches your expanded Octopus/Training set)
 ASSETS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", 
     "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT", "TRXUSDT",
@@ -42,6 +43,8 @@ ASSETS = [
     "SHIBUSDT", "TONUSDT", "UNIUSDT", "ZECUSDT", "BNBUSDT"
 ]
 
+START_DATE = "2020-01-01"
+END_DATE = "2026-01-01"
 BASE_INTERVAL = "15m"
 
 TIMEFRAMES = {
@@ -58,19 +61,16 @@ HISTORY_LOG = []
 HISTORY_ACCURACY = 0.0
 LAST_UPDATE = "Never"
 
-# In-Memory Data Cache (The "Stateful" Part)
-# Format: { "BTCUSDT": pd.DataFrame(columns=['timestamp', 'price']), ... }
-DATA_CACHE = {} 
-CACHE_DAYS = 15  # Buffer to cover 10d sequence + resampling overhead
-
 # --- 0. DATABASE SETUP ---
 DATABASE_URL = os.getenv("DATABASE_URL")
 SessionLocal = None
 Base = declarative_base()
 
 if DATABASE_URL:
+    # Fix for Railway/Heroku postgres:// vs postgresql://
     if DATABASE_URL.startswith("postgres://"):
         DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+    
     try:
         engine = create_engine(DATABASE_URL)
         SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -79,10 +79,11 @@ if DATABASE_URL:
         print(f">>> Database connection failed: {e}")
         DATABASE_URL = None
 
+# Define Models
 class HistoryEntry(Base):
     __tablename__ = 'signal_history'
     id = Column(Integer, primary_key=True, index=True)
-    time_str = Column(String)
+    time_str = Column(String) # Stored as string to match existing format
     asset = Column(String)
     tf = Column(String)
     signal = Column(String)
@@ -95,9 +96,10 @@ class MatrixEntry(Base):
     __tablename__ = 'live_matrix'
     asset = Column(String, primary_key=True)
     tf = Column(String, primary_key=True)
-    signal_val = Column(Integer) 
+    signal_val = Column(Integer) # 1, -1, 0
     updated_at = Column(DateTime, default=datetime.utcnow)
 
+# Create Tables
 if DATABASE_URL and engine:
     try:
         Base.metadata.create_all(bind=engine)
@@ -123,94 +125,115 @@ def deserialize_map(json_map):
         clean_map[parse_map_key(k)] = int_counter
     return clean_map
 
-def get_resampled_df(df, target_freq):
-    """
-    Expects a DataFrame with a datetime index.
-    Returns a DataFrame with 'price' column.
-    """
-    if df.empty: return pd.DataFrame()
-    if target_freq is None: 
-        return df[['price']]
+def resample_prices(raw_data, target_freq):
+    if not raw_data: return []
+    if target_freq is None:
+        return [x[1] for x in raw_data]
     
-    # Resample and take the last close
-    resampled = df['price'].resample(target_freq).last().dropna().to_frame()
-    return resampled
+    df = pd.DataFrame(raw_data, columns=['timestamp', 'price'])
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df.set_index('timestamp', inplace=True)
+    resampled = df['price'].resample(target_freq).last().dropna()
+    return resampled.tolist()
 
-# --- 2. DATA MANAGEMENT (OPTIMIZED) ---
+def get_resampled_df(raw_data, target_freq):
+    if not raw_data: return pd.DataFrame()
+    df = pd.DataFrame(raw_data, columns=['timestamp', 'price'])
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df.set_index('timestamp', inplace=True)
+    if target_freq is None: return df
+    return df['price'].resample(target_freq).last().dropna().to_frame()
 
-def fetch_binance_candles(symbol, limit=1000):
-    """
-    Fetches the latest N candles. 
-    Used for both initialization (limit=1000) and live updates (limit=5).
-    """
+# --- 2. DATA MANAGEMENT ---
+
+def fetch_binance_segment(symbol, start_ts, end_ts):
     base_url = "https://api.binance.com/api/v3/klines"
-    url = f"{base_url}?symbol={symbol}&interval={BASE_INTERVAL}&limit={limit}"
-    try:
-        with urllib.request.urlopen(url, timeout=5) as response:
-            data = json.loads(response.read().decode())
-            if not data: return []
-            # Parse: [timestamp(ms), open, high, low, close, ...]
-            # We only need Close Price and Close Time
-            return [(int(c[6]), float(c[4])) for c in data]
-    except Exception as e:
-        print(f"[{symbol}] Error fetching: {e}")
-        return []
+    segment_candles = []
+    current_start = start_ts
+    while current_start < end_ts:
+        url = f"{base_url}?symbol={symbol}&interval={BASE_INTERVAL}&startTime={current_start}&endTime={end_ts}&limit=1000"
+        try:
+            with urllib.request.urlopen(url) as response:
+                data = json.loads(response.read().decode())
+                if not data: break
+                batch = [(int(c[6]), float(c[4])) for c in data]
+                segment_candles.extend(batch)
+                last_time = data[-1][6]
+                if last_time >= end_ts - 1000: break
+                current_start = last_time + 1
+        except Exception as e:
+            print(f"[{symbol}] Error fetching segment: {e}")
+            break
+    return segment_candles
 
-def initialize_cache():
-    print(f"--- Initializing Data Cache ({CACHE_DAYS} Days) ---")
+def sync_ohlc_with_github(symbol):
+    print(f"[{symbol}] Syncing OHLC data...")
+    filename = f"ohlc/{symbol}.csv"
+    url = GITHUB_API_BASE + filename
+    headers = {"Authorization": f"Bearer {GITHUB_PAT}"} if GITHUB_PAT else {}
     
-    def load_asset(asset):
-        # Calculate how many 15m candles in X days
-        # 24 * 4 = 96 candles per day. 
-        limit = CACHE_DAYS * 96 
-        if limit > 1000: limit = 1000 # Binance max per request is 1000
+    existing_data = []
+    sha = None
+    last_stored_ts = 0
+    
+    try:
+        resp = requests.get(url, headers=headers)
+        if resp.status_code == 200:
+            file_info = resp.json()
+            sha = file_info.get("sha")
+            download_url = file_info.get("download_url")
+            content_resp = requests.get(download_url)
+            if content_resp.status_code == 200:
+                csv_text = content_resp.text
+                df_exist = pd.read_csv(StringIO(csv_text), names=["timestamp", "price"])
+                if not df_exist.empty:
+                    existing_data = list(df_exist.itertuples(index=False, name=None))
+                    last_stored_ts = int(existing_data[-1][0])
+                    print(f"[{symbol}] Found cached data up to {datetime.fromtimestamp(last_stored_ts/1000)}")
+    except Exception as e:
+        print(f"[{symbol}] Could not fetch existing data: {e}")
+
+    if last_stored_ts == 0:
+        start_ts = int(datetime.strptime(START_DATE, "%Y-%m-%d").timestamp() * 1000)
+    else:
+        start_ts = last_stored_ts + 1
         
-        # If we really need >1000, we'd need loop, but for now 1000 is ~10 days. 
-        # To get 15 days, we might need 2 calls, but let's start with 1000 for speed.
-        raw = fetch_binance_candles(asset, limit=1000)
-        
-        df = pd.DataFrame(raw, columns=['timestamp', 'price'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df.set_index('timestamp', inplace=True)
-        return asset, df
+    end_ts = int(datetime.strptime(END_DATE, "%Y-%m-%d").timestamp() * 1000)
+    current_ts = int(time.time() * 1000)
+    if end_ts > current_ts: end_ts = current_ts
 
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        futures = [executor.submit(load_asset, asset) for asset in ASSETS]
-        for future in as_completed(futures):
-            asset, df = future.result()
-            DATA_CACHE[asset] = df
-            print(f"[{asset}] Cache initialized with {len(df)} candles.")
+    new_data = []
+    if start_ts < end_ts:
+        print(f"[{symbol}] Fetching new data from Binance...")
+        new_data = fetch_binance_segment(symbol, start_ts, end_ts)
+        print(f"[{symbol}] Fetched {len(new_data)} new candles.")
+    
+    full_data = existing_data + new_data
+    
+    if new_data and full_data:
+        try:
+            df_full = pd.DataFrame(full_data, columns=["timestamp", "price"])
+            csv_buffer = StringIO()
+            df_full.to_csv(csv_buffer, header=False, index=False)
+            csv_content = csv_buffer.getvalue()
+            b64_content = base64.b64encode(csv_content.encode('utf-8')).decode('utf-8')
+            payload = {
+                "message": f"Update {symbol} OHLC data",
+                "content": b64_content,
+                "branch": "main"
+            }
+            if sha: payload["sha"] = sha
+            requests.put(url, headers=headers, json=payload)
+            print(f"[{symbol}] Saved updated OHLC to GitHub.")
+        except Exception as e:
+            print(f"[{symbol}] Error saving to GitHub: {e}")
 
-def update_cache_parallel():
-    """
-    Fast update: Fetches last 5 candles for ALL assets in parallel.
-    Merges into global cache.
-    """
-    def fetch_update(asset):
-        # Fetch just enough to cover potential gaps
-        new_data = fetch_binance_candles(asset, limit=5)
-        return asset, new_data
+    return full_data
 
-    with ThreadPoolExecutor(max_workers=20) as executor:
-        futures = [executor.submit(fetch_update, asset) for asset in ASSETS]
-        for future in as_completed(futures):
-            asset, raw_data = future.result()
-            if not raw_data: continue
-            
-            new_df = pd.DataFrame(raw_data, columns=['timestamp', 'price'])
-            new_df['timestamp'] = pd.to_datetime(new_df['timestamp'], unit='ms')
-            new_df.set_index('timestamp', inplace=True)
-            
-            # Combine and deduplicate
-            current_df = DATA_CACHE.get(asset, pd.DataFrame())
-            combined = pd.concat([current_df, new_df])
-            combined = combined[~combined.index.duplicated(keep='last')]
-            
-            # Keep size manageable (last 1500 rows ~ 15 days)
-            if len(combined) > 1500:
-                combined = combined.iloc[-1500:]
-            
-            DATA_CACHE[asset] = combined
+def get_binance_recent(symbol, days=20):
+    end_ts = int(time.time() * 1000)
+    start_ts = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
+    return fetch_binance_segment(symbol, start_ts, end_ts)
 
 def fetch_models_from_github():
     print("--- Downloading Strategies from GitHub ---")
@@ -242,11 +265,13 @@ def fetch_models_from_github():
                         })
                     
                     models_cache[asset][tf] = {
-                        "strategies": strategies
+                        "strategies": strategies,
+                        "expected_acc": file_content.get("combined_accuracy", 0),
+                        "expected_trades": file_content.get("combined_trades", 0)
                     }
+                    print(f"[{asset}] Loaded {tf} models.")
             except Exception as e:
-                pass # Silent fail to keep logs clean
-    print(">>> Models Loaded.")
+                print(f"Error downloading {filename}: {e}")
     return models_cache
 
 # --- 3. INFERENCE LOGIC ---
@@ -278,12 +303,9 @@ def get_prediction(model_type, abs_map, der_map, a_seq, d_seq, last_val, all_val
 
 def generate_signal(prices, strategies):
     if not strategies: return 0
-    if not prices: return 0
-    
     active_directions = []
-    max_seq_len = max(s['seq_len'] for s in strategies)
     
-    # Check strict length requirement
+    max_seq_len = max(s['seq_len'] for s in strategies)
     if len(prices) < max_seq_len + 1: return 0
 
     for model in strategies:
@@ -322,52 +344,132 @@ def generate_signal(prices, strategies):
     elif down > up: return -1
     return 0
 
-# --- 4. BACKGROUND TASKS (SLOW PATH) ---
+# --- 4. VERIFICATION & HISTORICAL ANALYSIS ---
 
-def run_history_analysis(models_cache):
-    """
-    Runs complex historical analysis and GitHub syncing.
-    This is slow, so it runs in a background thread.
-    """
-    print("[Background] Starting History Analysis...")
+def run_strict_verification(models_cache):
+    print("\n========================================")
+    print("STARTING STRICT MODEL VERIFICATION")
+    print("========================================")
+    passed_all = True
+    
+    for asset in ASSETS:
+        full_raw_data = sync_ohlc_with_github(asset)
+        
+        for tf_name, model_data in models_cache[asset].items():
+            strategies = model_data['strategies']
+            exp_acc = model_data['expected_acc']
+            exp_trades = model_data['expected_trades']
+            
+            tf_pandas = TIMEFRAMES[tf_name]
+            prices = resample_prices(full_raw_data, tf_pandas)
+            
+            max_seq_len = max(s['seq_len'] for s in strategies)
+            total_test_len = len(prices) - max_seq_len
+            
+            for s in strategies:
+                s['cached_buckets'] = [get_bucket(p, s['bucket_size']) for p in prices]
+            
+            unique_correct = 0
+            unique_total = 0
+            
+            for i in range(total_test_len):
+                target_idx = i + max_seq_len
+                active_directions = []
+                
+                for model in strategies:
+                    seq_len = model['seq_len']
+                    buckets = model['cached_buckets']
+                    
+                    start_seq_idx = target_idx - seq_len
+                    a_seq = tuple(buckets[start_seq_idx : target_idx])
+                    
+                    if seq_len > 1:
+                        d_seq = tuple(a_seq[k] - a_seq[k-1] for k in range(1, len(a_seq)))
+                    else: d_seq = ()
+                        
+                    last_val = a_seq[-1]
+                    actual_val = buckets[target_idx]
+                    
+                    diff = actual_val - last_val
+                    model_actual_dir = 1 if diff > 0 else (-1 if diff < 0 else 0)
+                    
+                    pred_val = get_prediction(model['config']['model_type'], model['abs_map'], model['der_map'],
+                                              a_seq, d_seq, last_val, model['all_vals'], model['all_changes'])
+                    
+                    pred_diff = pred_val - last_val
+                    
+                    if pred_diff != 0:
+                        direction = 1 if pred_diff > 0 else -1
+                        is_correct = (direction == model_actual_dir)
+                        is_flat = (model_actual_dir == 0)
+                        active_directions.append({"dir": direction, "is_correct": is_correct, "is_flat": is_flat})
+                
+                if not active_directions: continue
+                
+                dirs = [x['dir'] for x in active_directions]
+                up_votes = dirs.count(1)
+                down_votes = dirs.count(-1)
+                
+                final_dir = 0
+                if up_votes > down_votes: final_dir = 1
+                elif down_votes > up_votes: final_dir = -1
+                else: continue
+                
+                winning_voters = [x for x in active_directions if x['dir'] == final_dir]
+                if all(x['is_flat'] for x in winning_voters): continue
+                
+                unique_total += 1
+                if any(x['is_correct'] for x in winning_voters): unique_correct += 1
+            
+            calc_acc = (unique_correct / unique_total * 100) if unique_total > 0 else 0
+            acc_match = abs(calc_acc - exp_acc) < 0.5
+            trade_match = abs(unique_total - exp_trades) < 5
+            
+            status = "PASS" if (acc_match and trade_match) else "FAIL"
+            if status == "FAIL": passed_all = False
+            print(f"[{status}] {asset} {tf_name} | Calc: {calc_acc:.2f}% ({unique_total}) | Json: {exp_acc:.2f}% ({exp_trades})")
+            
+    return passed_all
+
+def populate_weekly_history(models_cache):
+    print("\n--- Generating Signal Log & Calculating Strict Accuracy ---")
     global HISTORY_LOG, HISTORY_ACCURACY
     logs = []
     
-    # Use data from cache directly to avoid fetching again
     cutoff_time = datetime.now() - timedelta(days=7)
+    
     total_wins = 0
     total_valid_moves = 0
     
     for asset in ASSETS:
-        df_master = DATA_CACHE.get(asset)
-        if df_master is None or df_master.empty: continue
-
+        raw_data = get_binance_recent(asset, days=20)
+        
         for tf_name, model_data in models_cache.get(asset, {}).items():
             strategies = model_data['strategies']
             tf_pandas = TIMEFRAMES[tf_name]
+            
             min_bucket_size = min(s['bucket_size'] for s in strategies)
             
-            # Resample from cached master data
-            df = get_resampled_df(df_master, tf_pandas)
+            df = get_resampled_df(raw_data, tf_pandas)
             if df.empty: continue
             
             prices = df['price'].tolist()
             timestamps = df.index.tolist()
+            
             max_seq = max(s['seq_len'] for s in strategies)
             start_idx = max_seq + 1
             
             if len(prices) <= start_idx: continue
             
-            # Analyze last 100 points only to save CPU
-            scan_start = max(start_idx, len(prices) - 100) 
-            
-            for i in range(scan_start, len(prices) - 1): 
-                target_ts = timestamps[i]
-                if target_ts < cutoff_time: continue
-
+            for i in range(start_idx, len(prices) - 1): 
                 hist_prices = prices[:i]
                 current_price = prices[i-1]
+                target_ts = timestamps[i]
+                
                 outcome_price = prices[i]
+                
+                if target_ts < cutoff_time:
+                    continue
                 
                 sig = generate_signal(hist_prices, strategies)
                 
@@ -377,6 +479,7 @@ def run_history_analysis(models_cache):
                     bucket_diff = end_bucket - start_bucket
                     
                     outcome_str = "NOISE"
+                    
                     if sig == 1:
                         if bucket_diff > 0: outcome_str = "WIN"
                         elif bucket_diff < 0: outcome_str = "LOSS"
@@ -385,10 +488,12 @@ def run_history_analysis(models_cache):
                         elif bucket_diff > 0: outcome_str = "LOSS"
                     
                     if outcome_str == "WIN":
-                        total_wins += 1; total_valid_moves += 1
+                        total_wins += 1
+                        total_valid_moves += 1
                     elif outcome_str == "LOSS":
                         total_valid_moves += 1
                     
+                    # --- NEW: PERCENTAGE CHANGE CALCULATION ---
                     pct_change = ((outcome_price - current_price) / current_price) * 100
 
                     logs.append({
@@ -404,81 +509,56 @@ def run_history_analysis(models_cache):
     
     logs.sort(key=lambda x: x['time'], reverse=True)
     HISTORY_LOG = logs
-    HISTORY_ACCURACY = (total_wins / total_valid_moves * 100) if total_valid_moves > 0 else 0.0
-    print(f"[Background] History Updated. Acc: {HISTORY_ACCURACY:.2f}%")
+    
+    if total_valid_moves > 0:
+        HISTORY_ACCURACY = (total_wins / total_valid_moves) * 100
+    else:
+        HISTORY_ACCURACY = 0.0
+        
+    print(f"Generated {len(HISTORY_LOG)} signals. Strict Accuracy: {HISTORY_ACCURACY:.2f}%")
 
-    # Save History to DB
+    # --- SAVE TO DB ---
     if SessionLocal:
         try:
             session = SessionLocal()
+            # We clear old history and replace with re-verified history
             session.query(HistoryEntry).delete()
             for log in logs:
                 entry = HistoryEntry(
-                    time_str=log['time'], asset=log['asset'], tf=log['tf'],
-                    signal=log['signal'], price_at_signal=log['price_at_signal'],
-                    outcome=log['outcome'], close_price=log['close_price']
+                    time_str=log['time'],
+                    asset=log['asset'],
+                    tf=log['tf'],
+                    signal=log['signal'],
+                    price_at_signal=log['price_at_signal'],
+                    outcome=log['outcome'],
+                    close_price=log['close_price']
+                    # pct_change is deliberately excluded from DB to avoid schema migration issues
                 )
                 session.add(entry)
             session.commit()
             session.close()
+            print("[DB] Signal History saved to Database.")
         except Exception as e:
-            print(f"[DB Error] History save failed: {e}")
+            print(f"[DB Error] Could not save history: {e}")
 
-# --- 5. LIVE SERVER (FAST PATH) ---
-
-def save_matrix_to_db(matrix):
-    """
-    Fast DB commit for the live matrix only.
-    """
-    if not SessionLocal: return
-    try:
-        session = SessionLocal()
-        session.query(MatrixEntry).delete()
-        for asset, tfs in matrix.items():
-            for tf, val in tfs.items():
-                session.add(MatrixEntry(asset=asset, tf=tf, signal_val=val))
-        session.commit()
-        session.close()
-        print("[DB] Matrix saved.")
-    except Exception as e:
-        print(f"[DB Error] Matrix save failed: {e}")
+# --- 5. LIVE SERVER ---
 
 def update_live_signals(models_cache):
-    """
-    CRITICAL PATH: Must run < 5 seconds.
-    1. Parallel Fetch (Network)
-    2. In-Memory Stitch (CPU)
-    3. Generate Signals (CPU)
-    4. Save Matrix (DB)
-    5. Spawn Background History (Thread)
-    """
     global SIGNAL_MATRIX, LAST_UPDATE
-    start_time = time.time()
-    print(f"\n[Scheduler] Start Update: {datetime.now().strftime('%H:%M:%S')}")
-    
-    # 1. Update Data Cache (Parallel)
-    update_cache_parallel()
-    
+    print(f"\n[Scheduler] Updating signals at {datetime.now().strftime('%H:%M:%S')}...")
     temp_matrix = {}
     
-    # 2 & 3. Compute Signals
     for asset in ASSETS:
         temp_matrix[asset] = {}
-        df_master = DATA_CACHE.get(asset)
+        raw_data = get_binance_recent(asset, days=20)
         
-        if df_master is None or df_master.empty:
-            continue
-            
         for tf_name, model_data in models_cache.get(asset, {}).items():
             strategies = model_data['strategies']
             tf_pandas = TIMEFRAMES[tf_name]
+            prices = resample_prices(raw_data, tf_pandas)
             
-            # Fast in-memory resample
-            df_resampled = get_resampled_df(df_master, tf_pandas)
-            
-            # Convert to list for legacy logic
-            # We strip the last candle to match the "completed candle" logic
-            prices = df_resampled['price'].tolist()[:-1] 
+            if prices:
+                prices = prices[:-1]
             
             sig = generate_signal(prices, strategies)
             temp_matrix[asset][tf_name] = sig
@@ -486,15 +566,27 @@ def update_live_signals(models_cache):
     SIGNAL_MATRIX = temp_matrix
     LAST_UPDATE = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    # 4. Save to DB (Blocking but fast)
-    save_matrix_to_db(temp_matrix)
+    # --- SAVE MATRIX TO DB ---
+    if SessionLocal:
+        try:
+            session = SessionLocal()
+            session.query(MatrixEntry).delete()
+            for asset, tfs in temp_matrix.items():
+                for tf, val in tfs.items():
+                    entry = MatrixEntry(
+                        asset=asset,
+                        tf=tf,
+                        signal_val=val
+                    )
+                    session.add(entry)
+            session.commit()
+            session.close()
+            print("[DB] Live Signal Matrix saved to Database.")
+        except Exception as e:
+            print(f"[DB Error] Could not save matrix: {e}")
     
-    elapsed = time.time() - start_time
-    print(f"[Scheduler] Signals Generated in {elapsed:.2f}s")
-    
-    # 5. Background Tasks
-    t = threading.Thread(target=run_history_analysis, args=(models_cache,))
-    t.start()
+    populate_weekly_history(models_cache)
+    print("[Scheduler] Signals Updated.")
 
 app = Flask(__name__)
 
@@ -571,9 +663,9 @@ def home():
             <tbody>
     """
     
-    for log in HISTORY_LOG[:100]:
+    for log in HISTORY_LOG[:150]:
         cls = "buy" if log['signal'] == "BUY" else "sell"
-        res_cls = log['outcome']
+        res_cls = log['outcome'] # WIN, LOSS, NOISE
         pct_txt = f"{log['pct_change']:+.2f}%"
         
         html += f"""
@@ -593,26 +685,23 @@ def home():
 
 def run_scheduler(models_cache):
     print("Initializing Live Scheduler...")
-    # Initialize Cache First
-    initialize_cache()
-    
-    # Initial Run
     update_live_signals(models_cache)
-    
-    # Schedule
     schedule.every().hour.at(":00").do(update_live_signals, models_cache)
     schedule.every().hour.at(":15").do(update_live_signals, models_cache)
     schedule.every().hour.at(":30").do(update_live_signals, models_cache)
     schedule.every().hour.at(":45").do(update_live_signals, models_cache)
-    
     while True:
         schedule.run_pending()
-        time.sleep(0.5)
+        time.sleep(1)
 
 if __name__ == "__main__":
     models = fetch_models_from_github()
-    print(">>> Starting Server...")
-    t = threading.Thread(target=run_scheduler, args=(models,))
-    t.daemon = True
-    t.start()
-    app.run(host='0.0.0.0', port=8080)
+    if run_strict_verification(models):
+        print("\n>>> VERIFICATION SUCCESSFUL. STARTING LIVE SERVER. <<<")
+        populate_weekly_history(models)
+        t = threading.Thread(target=run_scheduler, args=(models,))
+        t.daemon = True
+        t.start()
+        app.run(host='0.0.0.0', port=8080)
+    else:
+        print("\n>>> VERIFICATION FAILED. SERVER WILL NOT START. <<<")
