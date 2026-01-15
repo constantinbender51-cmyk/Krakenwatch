@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import time
+import random
 import requests
 import psycopg2
 import pandas as pd
@@ -49,8 +50,6 @@ def get_db_connection():
 def init_db():
     conn = get_db_connection()
     cur = conn.cursor()
-    
-    # Reset Signals Table (Active Snapshot)
     cur.execute("DROP TABLE IF EXISTS signals;")
     cur.execute("""
         CREATE TABLE signals (
@@ -62,8 +61,6 @@ def init_db():
             PRIMARY KEY (asset, timeframe)
         );
     """)
-
-    # History Table (Metrics)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS history (
             id SERIAL PRIMARY KEY,
@@ -76,7 +73,6 @@ def init_db():
             closed_at TIMESTAMPTZ DEFAULT NOW()
         );
     """)
-    
     conn.commit()
     cur.close()
     conn.close()
@@ -103,7 +99,6 @@ def overwrite_signal(conn, asset, tf, signal, start_dt, end_dt):
 def record_trade_result(conn, asset, tf, signal, entry_price, exit_price, timestamp_dt):
     if signal == 0 or entry_price == 0: return
     pnl = ((exit_price - entry_price) / entry_price) * signal
-    
     try:
         cur = conn.cursor()
         cur.execute("""
@@ -129,7 +124,6 @@ def compute_7d_metrics(conn):
         """, (since,))
         row = cur.fetchone()
         cur.close()
-        
         if row and row[0] > 0:
             acc = (row[1] / row[0]) * 100
             print(f"\n[METRICS] Trades: {row[0]} | Acc: {acc:.2f}% | PnL: {row[2]*100:.2f}%")
@@ -139,32 +133,26 @@ def compute_7d_metrics(conn):
         pass
 
 # =========================================
-# 3. DATA & STRATEGY
+# 3. DATA UTILITIES
 # =========================================
 
-def fetch_binance_history_7d(symbol):
-    """Fetch 7 days of 1m data"""
+def fetch_binance_history_custom(symbol, days=7):
     base_url = "https://api.binance.com/api/v3/klines"
     end_time = int(time.time() * 1000)
-    start_time = end_time - (7 * 24 * 60 * 60 * 1000)
-    
+    start_time = end_time - (days * 24 * 60 * 60 * 1000)
     all_candles = []
     current_start = start_time
     
-    print(f"[{symbol}] Downloading History...", end=" ")
     while current_start < end_time:
         try:
             r = requests.get(base_url, params={"symbol": symbol, "interval": "1m", "startTime": current_start, "limit": 1000})
             data = r.json()
             if not data or not isinstance(data, list): break
-            
             batch = [{"timestamp": int(c[0]), "price": float(c[4])} for c in data]
             all_candles.extend(batch)
             current_start = batch[-1]["timestamp"] + 1
             time.sleep(0.05)
         except: break
-            
-    print(f"Done ({len(all_candles)} candles).")
     return all_candles
 
 def fetch_kraken_latest(pair):
@@ -193,7 +181,7 @@ class MarketBuffer:
         else:
             combined = pd.concat([self.data[asset], df])
             combined = combined[~combined.index.duplicated(keep='last')]
-            self.data[asset] = combined.sort_index().iloc[-15000:]
+            self.data[asset] = combined.sort_index().iloc[-20000:]
 
     def get_prices(self, asset, tf_alias):
         if asset not in self.data: return []
@@ -204,6 +192,7 @@ class MarketBuffer:
 class StrategyLoader:
     def __init__(self):
         self.models = {}
+        self.specs = {}
 
     def load(self):
         if not GITHUB_PAT: return
@@ -214,6 +203,7 @@ class StrategyLoader:
                     data = requests.get(f['download_url']).json()
                     key = f['name'].replace(".json", "")
                     self.models[key] = data.get('strategies', [])
+                    self.specs[key] = data.get('holdout_stats', {})
                     print(f"Loaded Model: {key}")
         except Exception as e:
             print(f"Model Load Failed: {e}")
@@ -222,10 +212,6 @@ class StrategyLoader:
         return int(price // size) if size > 0 else 0
 
     def predict(self, asset, tf, price_series):
-        """
-        UPDATED: Now handles 'Compact' model files where maps 
-        contain direct values instead of frequency counters.
-        """
         key = f"{asset}_{tf}"
         strategies = self.models.get(key, [])
         if not strategies: return 0
@@ -253,31 +239,22 @@ class StrategyLoader:
 
             pred_val = None
             
-            # --- UPDATED LOGIC FOR COMPACT MAPS ---
-            # Direct dictionary lookup. No more max() needed.
-            
             if cfg['model'] == "Absolute" and a_seq in p['abs_map']:
-                pred_val = p['abs_map'][a_seq] # Direct access
+                pred_val = p['abs_map'][a_seq]
             
             elif cfg['model'] == "Derivative" and d_seq in p['der_map']:
-                change = p['der_map'][d_seq]   # Direct access
+                change = p['der_map'][d_seq]
                 pred_val = bkts[-1] + change
             
-            # Combined logic: only if individual parts exist
             elif cfg['model'] == "Combined":
                 val_abs = p['abs_map'].get(a_seq)
                 val_der = p['der_map'].get(d_seq)
-                
                 if val_abs is not None and val_der is not None:
-                     # Calculate derivative prediction value
                     pred_der_val = bkts[-1] + val_der
-                    
-                    # Direction check
                     dir_a = 1 if val_abs > bkts[-1] else -1 if val_abs < bkts[-1] else 0
                     dir_d = 1 if pred_der_val > bkts[-1] else -1 if pred_der_val < bkts[-1] else 0
-                    
                     if dir_a == dir_d and dir_a != 0:
-                        pred_val = val_abs # (Value doesn't matter much if direction agrees)
+                        pred_val = val_abs
 
             if pred_val is not None:
                 if pred_val > bkts[-1]: votes += 1
@@ -286,48 +263,86 @@ class StrategyLoader:
         return 1 if votes > 0 else -1 if votes < 0 else 0
 
 # =========================================
-# 4. BACKFILL LOGIC
+# 4. VALIDATION & SAFETY GUARDRAIL
 # =========================================
 
-def run_backfill(conn, market, engine):
-    print("\n--- Starting Backfill (Generating History) ---")
-    total_trades = 0
+def validate_random_model_spec(engine):
+    """
+    STRICT VALIDATION:
+    If metrics deviate > 5% from spec, RAISE ERROR and STOP.
+    """
+    if not engine.models:
+        print("Validation Skipped: No models loaded.")
+        return
+
+    keys = list(engine.models.keys())
+    target_key = random.choice(keys)
+    asset_pair, tf = target_key.split("_")
     
-    for asset in ASSETS.keys():
-        for tf_name, tf_alias in TIMEFRAMES.items():
-            
-            if f"{asset}_{tf_name}" not in engine.models:
-                continue
-                
-            full_series = market.get_prices(asset, tf_alias)
-            if len(full_series) < 100: continue
-            
-            timestamps = full_series.index
-            prices = full_series.values
-            
+    print(f"\n[SAFETY CHECK] Verifying {target_key} against ~9.6mo history...")
+    
+    if asset_pair not in ASSETS:
+        print(f"[SAFETY CHECK] Skipped: Asset {asset_pair} not in ASSETS map.")
+        return
+
+    # Fetch ~292 days
+    raw_data = fetch_binance_history_custom(ASSETS[asset_pair]['binance'], days=292)
+    if not raw_data:
+        raise RuntimeError("Validation Failed: Could not fetch history data.")
+
+    df = pd.DataFrame(raw_data)
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df.set_index('timestamp', inplace=True)
+    
+    tf_alias = TIMEFRAMES.get(tf, "1min")
+    if tf_alias == "1min":
+        prices = df['price']
+    else:
+        prices = df['price'].resample(tf_alias).last().dropna()
+        
+    price_values = prices.values
+    
+    trades = 0
+    correct = 0
+    active_signal = 0
+    last_val = 0
+    
+    for i in range(100, len(price_values) - 1):
+        if active_signal != 0:
+            change = price_values[i] - last_val
+            if (active_signal == 1 and change > 0) or (active_signal == -1 and change < 0):
+                correct += 1
+            if change != 0: 
+                trades += 1
             active_signal = 0
-            entry_price = 0.0
+
+        current_slice = price_values[i-20:i+1]
+        sig = engine.predict(asset_pair, tf, current_slice)
+        
+        if sig != 0:
+            active_signal = sig
+            last_val = price_values[i]
             
-            # Simulating history
-            for i in range(50, len(prices) - 1):
-                # Close previous
-                if active_signal != 0:
-                    record_trade_result(conn, asset, tf_name, active_signal, entry_price, prices[i], timestamps[i])
-                    total_trades += 1
-                    active_signal = 0 
-                
-                # Predict next
-                current_slice = prices[i-20:i+1]
-                sig = engine.predict(asset, tf_name, current_slice)
-                
-                # Open new
-                if sig != 0:
-                    active_signal = sig
-                    entry_price = prices[i]
-                    
-            print(f"Backfilled {asset} {tf_name}")
-            
-    print(f"Backfill Complete. {total_trades} historical trades generated.\n")
+    val_acc = (correct / trades * 100) if trades > 0 else 0
+    
+    spec = engine.specs.get(target_key, {})
+    spec_acc = spec.get('accuracy', 0)
+    spec_trades = spec.get('trades', 0)
+    
+    print(f"\n--- VALIDATION RESULTS ({target_key}) ---")
+    print(f"{'Metric':<15} | {'Spec':<20} | {'Validation':<20}")
+    print("-" * 60)
+    print(f"{'Accuracy':<15} | {spec_acc:.2f}%{'':<14} | {val_acc:.2f}%")
+    print("-" * 60)
+    
+    deviation = abs(val_acc - spec_acc)
+    if deviation > 5.0:
+        error_msg = f"CRITICAL: Validation deviation {deviation:.2f}% exceeds 5% limit! Stopping script."
+        print(f"\033[91m{error_msg}\033[0m") # Red text
+        raise RuntimeError(error_msg)
+        
+    print(">> PASS: Model behavior confirmed within tolerance.\n")
+
 
 # =========================================
 # 5. MAIN LOOP
@@ -341,16 +356,47 @@ def main():
     engine = StrategyLoader()
     engine.load()
     
-    # 1. FETCH HISTORY
+    # --- STEP 1: SAFETY CHECK (Will crash if fails) ---
+    validate_random_model_spec(engine)
+    
+    # --- STEP 2: LOAD LIVE CONTEXT ---
+    print("Fetching 7-day history for live operations...")
     for model_sym, pairs in ASSETS.items():
-        hist = fetch_binance_history_7d(pairs['binance'])
+        hist = fetch_binance_history_custom(pairs['binance'], days=7)
         market.ingest(model_sym, hist)
         
-    # 2. BACKFILL
-    run_backfill(conn, market, engine)
+    # --- STEP 3: BACKFILL METRICS ---
+    print("\n--- Starting Backfill ---")
+    total_trades = 0
+    for asset in ASSETS.keys():
+        for tf_name, tf_alias in TIMEFRAMES.items():
+            if f"{asset}_{tf_name}" not in engine.models: continue
+            
+            full_series = market.get_prices(asset, tf_alias)
+            if len(full_series) < 100: continue
+            
+            timestamps = full_series.index
+            prices = full_series.values
+            active_signal = 0
+            entry_price = 0.0
+            
+            for i in range(50, len(prices) - 1):
+                if active_signal != 0:
+                    record_trade_result(conn, asset, tf_name, active_signal, entry_price, prices[i], timestamps[i])
+                    total_trades += 1
+                    active_signal = 0 
+                
+                current_slice = prices[i-20:i+1]
+                sig = engine.predict(asset, tf_name, current_slice)
+                
+                if sig != 0:
+                    active_signal = sig
+                    entry_price = prices[i]
+    
+    print(f"Backfill Complete. {total_trades} trades generated.\n")
     compute_7d_metrics(conn)
     
-    # 3. LIVE LOOP
+    # --- STEP 4: LIVE LOOP ---
     print("Entering Live Mode...")
     while True:
         now = datetime.now()
@@ -370,8 +416,6 @@ def main():
             market.ingest(model_sym, [closed_candle])
             
             for tf_name, tf_pd in TIMEFRAMES.items():
-                
-                # Check Boundary
                 m = now_dt.minute
                 is_boundary = False
                 if tf_name == "1m": is_boundary = True
@@ -381,17 +425,14 @@ def main():
                 elif tf_name == "1h" and m == 0: is_boundary = True
                 
                 if is_boundary:
-                    # Close previous signal
                     prev_key = f"{model_sym}_{tf_name}"
                     if prev_key in market.last_signal:
                         old = market.last_signal[prev_key]
                         record_trade_result(conn, model_sym, tf_name, old['sig'], old['entry'], curr_price, now_dt)
                     
-                    # Predict
                     prices = market.get_prices(model_sym, tf_pd)
                     sig = engine.predict(model_sym, tf_name, prices)
                     
-                    # Upsert Active Signal
                     if sig != 0:
                         delta = int(tf_pd.replace("min","").replace("H","60").replace("1min","1"))
                         end_t = now_dt + timedelta(minutes=delta)
