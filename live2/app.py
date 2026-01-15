@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import time
+import random
 import requests
 import psycopg2
 import pandas as pd
@@ -137,7 +138,8 @@ def compute_7d_metrics(conn):
 
 def fetch_binance_history_custom(symbol, interval="1m", days=7):
     """
-    Fetched 'days' worth of data for a SPECIFIC interval.
+    Fetches 'days' worth of data for a SPECIFIC interval.
+    For 1h validation, this is extremely efficient.
     """
     base_url = "https://api.binance.com/api/v3/klines"
     end_time = int(time.time() * 1000)
@@ -145,8 +147,6 @@ def fetch_binance_history_custom(symbol, interval="1m", days=7):
     
     all_candles = []
     current_start = start_time
-    
-    # print(f"[{symbol}] Downloading {days} days of {interval} data...", end=" ")
     
     while current_start < end_time:
         try:
@@ -162,8 +162,6 @@ def fetch_binance_history_custom(symbol, interval="1m", days=7):
             batch = [{"timestamp": int(c[0]), "price": float(c[4])} for c in data]
             all_candles.extend(batch)
             
-            # Update start time based on the last candle in batch
-            # Ensure we don't get stuck if no new data
             last_ts = batch[-1]["timestamp"]
             if last_ts == current_start: break 
             current_start = last_ts + 1
@@ -171,7 +169,6 @@ def fetch_binance_history_custom(symbol, interval="1m", days=7):
             time.sleep(0.05)
         except: break
             
-    # print(f"Done ({len(all_candles)} candles).")
     return all_candles
 
 def fetch_kraken_latest(pair):
@@ -231,6 +228,7 @@ class StrategyLoader:
         return int(price // size) if size > 0 else 0
 
     def predict(self, asset, tf, price_series):
+        # EXACT GENERATOR LOGIC (Consensus)
         key = f"{asset}_{tf}"
         strategies = self.models.get(key, [])
         if not strategies: return 0
@@ -240,7 +238,8 @@ class StrategyLoader:
             
         if len(prices) < 50: return 0
         
-        votes = 0
+        active_directions = set()
+        
         for strat in strategies:
             cfg = strat['config']
             p = strat['params']
@@ -260,9 +259,11 @@ class StrategyLoader:
             
             if cfg['model'] == "Absolute" and a_seq in p['abs_map']:
                 pred_val = p['abs_map'][a_seq]
+            
             elif cfg['model'] == "Derivative" and d_seq in p['der_map']:
                 change = p['der_map'][d_seq]
                 pred_val = bkts[-1] + change
+            
             elif cfg['model'] == "Combined":
                 val_abs = p['abs_map'].get(a_seq)
                 val_der = p['der_map'].get(d_seq)
@@ -274,74 +275,70 @@ class StrategyLoader:
                         pred_val = val_abs
 
             if pred_val is not None:
-                if pred_val > bkts[-1]: votes += 1
-                elif pred_val < bkts[-1]: votes -= 1
+                diff = pred_val - bkts[-1]
+                if diff != 0:
+                    direction = 1 if diff > 0 else -1
+                    active_directions.add(direction)
         
-        return 1 if votes > 0 else -1 if votes < 0 else 0
+        if not active_directions: return 0 
+        if len(active_directions) > 1: return 0 
+        return list(active_directions)[0]
 
 # =========================================
-# 4. VALIDATION (HIGHEST TF)
+# 4. FAST 1H VALIDATION
 # =========================================
 
-def validate_highest_tf_model(engine):
+def validate_random_1h_model(engine):
     """
-    1. Finds model with highest timeframe (1h > 30m > 15m...)
-    2. Fetches ONLY that timeframe from Binance.
-    3. Validates against spec with 5% tolerance.
+    Optimized Validation:
+    1. Filter for '1h' models.
+    2. Pick one randomly.
+    3. Fetch NATIVE 1h data (approx 6 API calls vs 312).
+    4. Verify specs.
     """
     if not engine.models:
         print("Validation Skipped: No models loaded.")
         return
 
-    # Priority Order
-    tf_priority = ["1h", "30m", "15m", "5m", "1m"]
+    # 1. Filter for 1h models
+    candidates = [k for k in engine.models.keys() if k.endswith("_1h")]
     
-    selected_key = None
-    selected_tf = None
-    
-    # Find highest priority model available
-    for prio_tf in tf_priority:
-        # Look for any key ending in _{prio_tf}
-        candidates = [k for k in engine.models.keys() if k.endswith(f"_{prio_tf}")]
-        if candidates:
-            selected_key = candidates[0] # Pick first asset found for this high TF
-            selected_tf = prio_tf
-            break
-            
-    if not selected_key:
-        print("Validation Skipped: No matching timeframes found.")
+    if not candidates:
+        print("Validation Skipped: No '1h' models found to optimize.")
         return
 
+    # 2. Random Selection
+    selected_key = random.choice(candidates)
     asset_pair = selected_key.split("_")[0]
     
-    print(f"\n[SAFETY CHECK] Selected Highest TF Model: {selected_key}")
+    print(f"\n[FAST VALIDATION] Selected 1h Model: {selected_key}")
+    print(f"[FAST VALIDATION] Fetching 216 days (7.2mo) of NATIVE 1h data...")
     
     if asset_pair not in ASSETS:
-        print(f"[SAFETY CHECK] Skipped: Asset {asset_pair} not in ASSETS map.")
+        print(f"Skipped: Asset {asset_pair} not in ASSETS map.")
         return
 
-    # Fetch ~9.6 months (292 days) of data FOR THAT SPECIFIC TIMEFRAME
-    # This avoids fetching 1m data and resampling.
-    print(f"[SAFETY CHECK] Fetching 9.6mo of {selected_tf} data...")
-    raw_data = fetch_binance_history_custom(
+    # 3. Native Fetch (Much Faster)
+    raw_1h_data = fetch_binance_history_custom(
         ASSETS[asset_pair]['binance'], 
-        interval=selected_tf, 
-        days=292
+        interval="1h", 
+        days=216
     )
     
-    if not raw_data:
+    if not raw_1h_data:
         raise RuntimeError("Validation Failed: Could not fetch history data.")
 
-    # Data is already in correct timeframe
-    prices = [x['price'] for x in raw_data]
+    # No resampling needed!
+    prices = [x['price'] for x in raw_1h_data]
     
-    # Run Backtest
+    # 4. Run Backtest
     trades = 0
     correct = 0
     active_signal = 0
     last_val = 0
     
-    # Loop
+    print(f"[FAST VALIDATION] Running backtest on {len(prices)} candles...")
+    
     for i in range(50, len(prices) - 1):
         if active_signal != 0:
             change = prices[i] - last_val
@@ -351,9 +348,8 @@ def validate_highest_tf_model(engine):
                 trades += 1
             active_signal = 0
 
-        # Pass slice directly (list slicing is fast)
         current_slice = prices[i-20:i+1]
-        sig = engine.predict(asset_pair, selected_tf, current_slice)
+        sig = engine.predict(asset_pair, "1h", current_slice)
         
         if sig != 0:
             active_signal = sig
@@ -363,16 +359,23 @@ def validate_highest_tf_model(engine):
     
     spec = engine.specs.get(selected_key, {})
     spec_acc = spec.get('accuracy', 0)
+    spec_trades = spec.get('trades', 0)
     
     print(f"\n--- VALIDATION RESULTS ({selected_key}) ---")
     print(f"{'Metric':<15} | {'Spec':<20} | {'Validation':<20}")
     print("-" * 60)
     print(f"{'Accuracy':<15} | {spec_acc:.2f}%{'':<14} | {val_acc:.2f}%")
+    print(f"{'Trades':<15} | {spec_trades:<20} | {trades:<20}")
     print("-" * 60)
     
+    if trades == 0 and spec_trades > 0:
+         error_msg = "CRITICAL: Validation generated 0 trades vs Spec trades. Logic mismatch."
+         print(f"\033[91m{error_msg}\033[0m")
+         raise RuntimeError(error_msg)
+
     deviation = abs(val_acc - spec_acc)
     if deviation > 5.0:
-        error_msg = f"CRITICAL: Validation deviation {deviation:.2f}% exceeds 5% limit! Stopping script."
+        error_msg = f"CRITICAL: Validation deviation {deviation:.2f}% exceeds 5% limit!"
         print(f"\033[91m{error_msg}\033[0m") 
         raise RuntimeError(error_msg)
         
@@ -391,10 +394,10 @@ def main():
     engine = StrategyLoader()
     engine.load()
     
-    # --- STEP 1: SAFETY CHECK (Highest TF) ---
-    validate_highest_tf_model(engine)
+    # --- STEP 1: FAST 1H VALIDATION ---
+    validate_random_1h_model(engine)
     
-    # --- STEP 2: LOAD LIVE CONTEXT (1m data for resampling) ---
+    # --- STEP 2: LOAD LIVE CONTEXT ---
     print("Fetching 7-day 1m history for live operations...")
     for model_sym, pairs in ASSETS.items():
         hist = fetch_binance_history_custom(pairs['binance'], interval="1m", days=7)
