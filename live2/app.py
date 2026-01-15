@@ -56,11 +56,13 @@ def init_db():
     conn = get_db_connection()
     cur = conn.cursor()
     
-    # 1. Strict Signal Table (Snapshot of ACTIVE signals only)
-    # "asset timeframe signal start end nothing more NOTHING"
-    # We use (asset, timeframe) as PRIMARY KEY to enable Overwriting (Upsert)
+    # 1. DROP old signals table to ensure schema matches strict requirements
+    #    (It only holds active signals, so no long-term history is lost)
+    cur.execute("DROP TABLE IF EXISTS signals;")
+    
+    # 2. Strict Signal Table (Snapshot of ACTIVE signals only)
     cur.execute("""
-        CREATE TABLE IF NOT EXISTS signals (
+        CREATE TABLE signals (
             asset VARCHAR(20) NOT NULL,
             timeframe VARCHAR(10) NOT NULL,
             signal INT NOT NULL,
@@ -70,8 +72,7 @@ def init_db():
         );
     """)
 
-    # 2. Secondary History Table (For Metrics/PnL calculation only)
-    # Kept separate to keep 'signals' table pure.
+    # 3. Secondary History Table (For Metrics) - We KEEP this one safe
     cur.execute("""
         CREATE TABLE IF NOT EXISTS history (
             id SERIAL PRIMARY KEY,
@@ -88,7 +89,8 @@ def init_db():
     conn.commit()
     cur.close()
     conn.close()
-    print("Database initialized.")
+    print("Database initialized (Signals table reset).")
+
 
 def overwrite_signal(conn, asset, tf, signal, start_dt, end_dt):
     """
