@@ -35,13 +35,13 @@ REPO_OWNER = "constantinbender51-cmyk"
 REPO_NAME = "Models"
 GITHUB_API_BASE = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/"
 
+# UPDATED ASSETS LIST (Matches your expanded Octopus/Training set)
 ASSETS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", 
     "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT", "TRXUSDT",
     "BCHUSDT", "XLMUSDT", "LTCUSDT", "SUIUSDT", "HBARUSDT",
-    "SHIBUSDT", "TONUSDT", "UNIUSDT", "ZECUSDT"
+    "SHIBUSDT", "TONUSDT", "UNIUSDT", "ZECUSDT", "BNBUSDT"
 ]
-
 
 START_DATE = "2020-01-01"
 END_DATE = "2026-01-01"
@@ -493,6 +493,9 @@ def populate_weekly_history(models_cache):
                     elif outcome_str == "LOSS":
                         total_valid_moves += 1
                     
+                    # --- NEW: PERCENTAGE CHANGE CALCULATION ---
+                    pct_change = ((outcome_price - current_price) / current_price) * 100
+
                     logs.append({
                         "time": target_ts.strftime("%Y-%m-%d %H:%M"),
                         "asset": asset,
@@ -500,7 +503,8 @@ def populate_weekly_history(models_cache):
                         "signal": "BUY" if sig == 1 else "SELL",
                         "price_at_signal": current_price,
                         "outcome": outcome_str,
-                        "close_price": outcome_price
+                        "close_price": outcome_price,
+                        "pct_change": pct_change
                     })
     
     logs.sort(key=lambda x: x['time'], reverse=True)
@@ -517,7 +521,7 @@ def populate_weekly_history(models_cache):
     if SessionLocal:
         try:
             session = SessionLocal()
-            # We clear old history and replace with re-verified history to ensure outcome status is fresh
+            # We clear old history and replace with re-verified history
             session.query(HistoryEntry).delete()
             for log in logs:
                 entry = HistoryEntry(
@@ -528,6 +532,7 @@ def populate_weekly_history(models_cache):
                     price_at_signal=log['price_at_signal'],
                     outcome=log['outcome'],
                     close_price=log['close_price']
+                    # pct_change is deliberately excluded from DB to avoid schema migration issues
                 )
                 session.add(entry)
             session.commit()
@@ -565,7 +570,6 @@ def update_live_signals(models_cache):
     if SessionLocal:
         try:
             session = SessionLocal()
-            # Upsert or clear/insert logic. Clear/Insert is cleaner for full snapshot.
             session.query(MatrixEntry).delete()
             for asset, tfs in temp_matrix.items():
                 for tf, val in tfs.items():
@@ -652,6 +656,7 @@ def home():
                     <th>Timeframe</th>
                     <th>Signal</th>
                     <th>Price @ Sig</th>
+                    <th>% Change</th>
                     <th>Outcome</th>
                 </tr>
             </thead>
@@ -661,6 +666,8 @@ def home():
     for log in HISTORY_LOG[:150]:
         cls = "buy" if log['signal'] == "BUY" else "sell"
         res_cls = log['outcome'] # WIN, LOSS, NOISE
+        pct_txt = f"{log['pct_change']:+.2f}%"
+        
         html += f"""
         <tr>
             <td>{log['time']}</td>
@@ -668,6 +675,7 @@ def home():
             <td>{log['tf']}</td>
             <td class='{cls}'>{log['signal']}</td>
             <td>{log['price_at_signal']:.4f}</td>
+            <td>{pct_txt}</td>
             <td class='{res_cls}'>{log['outcome']}</td>
         </tr>
         """
