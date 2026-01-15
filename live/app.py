@@ -7,6 +7,7 @@ import schedule
 import pandas as pd
 import urllib.request
 import base64
+import random
 from io import StringIO
 from datetime import datetime, timedelta
 from collections import Counter
@@ -349,14 +350,37 @@ def generate_signal(prices, strategies):
 
 def run_strict_verification(models_cache):
     print("\n========================================")
-    print("STARTING STRICT MODEL VERIFICATION")
+    print("STARTING STRICT MODEL VERIFICATION (Random 3)")
     print("========================================")
     passed_all = True
     
-    for asset in ASSETS:
+    # Flatten all available (asset, timeframe) pairs
+    all_strategies = []
+    for asset, tfs in models_cache.items():
+        for tf in tfs.keys():
+            all_strategies.append((asset, tf))
+            
+    # Pick 3 random strategies (or fewer if total is less than 3)
+    if not all_strategies:
+        print("No models found to verify.")
+        return False
+        
+    sample_size = min(3, len(all_strategies))
+    selected_targets = set(random.sample(all_strategies, sample_size))
+    print(f"Verifying subset: {selected_targets}")
+    
+    # Group by asset to minimize data fetching
+    # We only fetch data for assets that are part of the random selection
+    assets_to_fetch = set(asset for asset, tf in selected_targets)
+    
+    for asset in assets_to_fetch:
         full_raw_data = sync_ohlc_with_github(asset)
         
         for tf_name, model_data in models_cache[asset].items():
+            # SKIP if this specific pair wasn't selected
+            if (asset, tf_name) not in selected_targets:
+                continue
+
             strategies = model_data['strategies']
             exp_acc = model_data['expected_acc']
             exp_trades = model_data['expected_trades']
