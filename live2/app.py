@@ -198,7 +198,7 @@ class MarketBuffer:
     def get_prices(self, asset, tf_alias):
         if asset not in self.data: return []
         df = self.data[asset]
-        if tf_alias == "1min": return df['price'] # Return Series for index access
+        if tf_alias == "1min": return df['price'] 
         return df['price'].resample(tf_alias).last().dropna()
 
 class StrategyLoader:
@@ -223,14 +223,13 @@ class StrategyLoader:
 
     def predict(self, asset, tf, price_series):
         """
-        price_series: A pandas Series or list of prices.
-        We predict for the END of the series.
+        UPDATED: Now handles 'Compact' model files where maps 
+        contain direct values instead of frequency counters.
         """
         key = f"{asset}_{tf}"
         strategies = self.models.get(key, [])
         if not strategies: return 0
         
-        # Convert to list for speed
         if hasattr(price_series, 'tolist'): prices = price_series.tolist()
         else: prices = price_series
             
@@ -253,13 +252,33 @@ class StrategyLoader:
                 d_seq = "|".join(map(str, [bkts[i] - bkts[i-1] for i in range(1, len(bkts))]))
 
             pred_val = None
-            if cfg['model'] == "Absolute" and a_seq in p['abs_map']:
-                c = p['abs_map'][a_seq]
-                pred_val = int(max(c, key=c.get))
-            elif cfg['model'] == "Derivative" and d_seq in p['der_map']:
-                c = p['der_map'][d_seq]
-                pred_val = bkts[-1] + int(max(c, key=c.get))
             
+            # --- UPDATED LOGIC FOR COMPACT MAPS ---
+            # Direct dictionary lookup. No more max() needed.
+            
+            if cfg['model'] == "Absolute" and a_seq in p['abs_map']:
+                pred_val = p['abs_map'][a_seq] # Direct access
+            
+            elif cfg['model'] == "Derivative" and d_seq in p['der_map']:
+                change = p['der_map'][d_seq]   # Direct access
+                pred_val = bkts[-1] + change
+            
+            # Combined logic: only if individual parts exist
+            elif cfg['model'] == "Combined":
+                val_abs = p['abs_map'].get(a_seq)
+                val_der = p['der_map'].get(d_seq)
+                
+                if val_abs is not None and val_der is not None:
+                     # Calculate derivative prediction value
+                    pred_der_val = bkts[-1] + val_der
+                    
+                    # Direction check
+                    dir_a = 1 if val_abs > bkts[-1] else -1 if val_abs < bkts[-1] else 0
+                    dir_d = 1 if pred_der_val > bkts[-1] else -1 if pred_der_val < bkts[-1] else 0
+                    
+                    if dir_a == dir_d and dir_a != 0:
+                        pred_val = val_abs # (Value doesn't matter much if direction agrees)
+
             if pred_val is not None:
                 if pred_val > bkts[-1]: votes += 1
                 elif pred_val < bkts[-1]: votes -= 1
@@ -267,7 +286,7 @@ class StrategyLoader:
         return 1 if votes > 0 else -1 if votes < 0 else 0
 
 # =========================================
-# 4. BACKFILL LOGIC (Crucial Addition)
+# 4. BACKFILL LOGIC
 # =========================================
 
 def run_backfill(conn, market, engine):
@@ -277,45 +296,34 @@ def run_backfill(conn, market, engine):
     for asset in ASSETS.keys():
         for tf_name, tf_alias in TIMEFRAMES.items():
             
-            # Check if model exists
             if f"{asset}_{tf_name}" not in engine.models:
                 continue
                 
-            # Get full price history for this timeframe
             full_series = market.get_prices(asset, tf_alias)
             if len(full_series) < 100: continue
             
-            # We need to loop through history
-            # Start from index 50 (warmup)
-            active_signal = 0
-            entry_price = 0.0
-            
-            # Optimization: Iterate efficiently
-            # We predict at index `i`, signal applies to `i+1` open/close
             timestamps = full_series.index
             prices = full_series.values
             
-            # Simple vector loop
+            active_signal = 0
+            entry_price = 0.0
+            
+            # Simulating history
             for i in range(50, len(prices) - 1):
-                # 1. Close previous trade?
-                # We assume trade closes at the END of this candle (i), 
-                # which is effectively the price we see now.
+                # Close previous
                 if active_signal != 0:
                     record_trade_result(conn, asset, tf_name, active_signal, entry_price, prices[i], timestamps[i])
                     total_trades += 1
-                    active_signal = 0 # Reset
+                    active_signal = 0 
                 
-                # 2. Predict for NEXT candle
-                # We pass the history UP TO 'i' to predict 'i+1'
-                # Slicing is slow, but necessary for correct simulation
-                current_slice = prices[i-20:i+1] # Optimization: Only pass enough for longest sequence (e.g., 20)
-                
+                # Predict next
+                current_slice = prices[i-20:i+1]
                 sig = engine.predict(asset, tf_name, current_slice)
                 
-                # 3. Open new trade
+                # Open new
                 if sig != 0:
                     active_signal = sig
-                    entry_price = prices[i] # We assume we enter at Close of 'i' / Open of 'i+1'
+                    entry_price = prices[i]
                     
             print(f"Backfilled {asset} {tf_name}")
             
@@ -333,16 +341,16 @@ def main():
     engine = StrategyLoader()
     engine.load()
     
-    # 1. FETCH
+    # 1. FETCH HISTORY
     for model_sym, pairs in ASSETS.items():
         hist = fetch_binance_history_7d(pairs['binance'])
         market.ingest(model_sym, hist)
         
-    # 2. BACKFILL (Populate History)
+    # 2. BACKFILL
     run_backfill(conn, market, engine)
     compute_7d_metrics(conn)
     
-    # 3. LIVE
+    # 3. LIVE LOOP
     print("Entering Live Mode...")
     while True:
         now = datetime.now()
@@ -373,7 +381,7 @@ def main():
                 elif tf_name == "1h" and m == 0: is_boundary = True
                 
                 if is_boundary:
-                    # Retrieve previous active signal to close it
+                    # Close previous signal
                     prev_key = f"{model_sym}_{tf_name}"
                     if prev_key in market.last_signal:
                         old = market.last_signal[prev_key]
@@ -383,7 +391,7 @@ def main():
                     prices = market.get_prices(model_sym, tf_pd)
                     sig = engine.predict(model_sym, tf_name, prices)
                     
-                    # Upsert Active
+                    # Upsert Active Signal
                     if sig != 0:
                         delta = int(tf_pd.replace("min","").replace("H","60").replace("1min","1"))
                         end_t = now_dt + timedelta(minutes=delta)
