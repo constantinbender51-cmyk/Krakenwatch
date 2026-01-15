@@ -26,10 +26,11 @@ REPO_NAME = os.getenv("REPO_NAME", "model-2")
 GITHUB_API_URL = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/"
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+# NOTE: Using Binance tickers for both live and model mapping to ensure consistency
 ASSETS = {
-    "BTCUSDT": {"binance": "BTCUSDT", "kraken": "XBTUSD"},
-    "ETHUSDT": {"binance": "ETHUSDT", "kraken": "ETHUSD"},
-    "SOLUSDT": {"binance": "SOLUSDT", "kraken": "SOLUSD"},
+    "BTCUSDT": "BTCUSDT",
+    "ETHUSDT": "ETHUSDT",
+    "SOLUSDT": "SOLUSDT",
 }
 
 TIMEFRAMES = {
@@ -167,14 +168,23 @@ def fetch_binance_history_custom(symbol, interval="1m", days=7):
             
     return all_candles
 
-def fetch_kraken_latest(pair):
+def fetch_binance_latest(symbol):
+    """
+    Fetches the latest completed candle from Binance.
+    Matches the data source used in training (Critical for 'Absolute' models).
+    """
     try:
-        r = requests.get(f"https://api.kraken.com/0/public/OHLC?pair={pair}&interval=1", timeout=5)
-        res = r.json().get('result', {})
-        for k, v in res.items():
-            if k != "last" and isinstance(v, list):
-                return [{"timestamp": int(c[0]) * 1000, "price": float(c[4])} for c in v[-2:]]
-    except: pass
+        # Limit 2 gets the last closed candle + the current open candle
+        r = requests.get("https://api.binance.com/api/v3/klines", params={
+            "symbol": symbol, "interval": "1m", "limit": 2
+        }, timeout=5)
+        data = r.json()
+        if data and isinstance(data, list) and len(data) >= 2:
+            # Return the second to last (latest CLOSED) candle
+            c = data[-2]
+            return [{"timestamp": int(c[0]), "price": float(c[4])}]
+    except Exception as e:
+        print(f"Binance Live Fetch Error: {e}")
     return None
 
 class MarketBuffer:
@@ -193,13 +203,25 @@ class MarketBuffer:
         else:
             combined = pd.concat([self.data[asset], df])
             combined = combined[~combined.index.duplicated(keep='last')]
-            self.data[asset] = combined.sort_index().iloc[-20000:]
+            # Keep last ~14 days of 1m data to safely resample 1h
+            self.data[asset] = combined.sort_index().iloc[-20160:]
 
     def get_prices(self, asset, tf_alias):
         if asset not in self.data: return []
         df = self.data[asset]
-        if tf_alias == "1min": return df['price'] 
-        return df['price'].resample(tf_alias).last().dropna()
+        
+        if tf_alias == "1min": 
+            return df['price']
+            
+        # Resample logic:
+        # We must drop the last bin if it's incomplete (current time) to avoid false signals
+        resampled = df['price'].resample(tf_alias).last().dropna()
+        
+        # Simple check: If the last timestamp is essentially "now" and the timeframe is large,
+        # it might be an open candle. (Pandas usually labels by left edge, but safety first).
+        # For simplicity in this script, we rely on the caller (main loop) only triggering
+        # on boundaries, but resampling correctly is key.
+        return resampled
 
 class StrategyLoader:
     def __init__(self):
@@ -225,7 +247,7 @@ class StrategyLoader:
 
     def predict(self, asset, tf, price_series):
         """
-        PREDICTION ENGINE (MATCHING GENERATOR LOGIC)
+        PREDICTION ENGINE
         """
         key = f"{asset}_{tf}"
         strategies = self.models.get(key, [])
@@ -234,7 +256,9 @@ class StrategyLoader:
         if hasattr(price_series, 'tolist'): prices = price_series.tolist()
         else: prices = price_series
             
-        if len(prices) < 50: return 0
+        # FIX: Lowered from 50 to 15.
+        # Max s_len is typically 12. We need at least s_len + 1 data points.
+        if len(prices) < 15: return 0
         
         active_directions = set()
         
@@ -264,7 +288,6 @@ class StrategyLoader:
                 pred_val = bkts[-1] + change
             
             elif cfg['model'] == "Combined":
-                # FALLBACK LOGIC RESTORED (Fixes 0 Trades issue)
                 val_abs = p['abs_map'].get(a_seq)
                 val_der = p['der_map'].get(d_seq)
                 
@@ -278,11 +301,6 @@ class StrategyLoader:
                 dir_der = 0
                 if pred_der is not None:
                     dir_der = 1 if pred_der > bkts[-1] else -1 if pred_der < bkts[-1] else 0
-                
-                # Generator Logic:
-                # if dir_abs != 0 and dir_der != 0 and dir_abs != dir_der: return None
-                # if dir_abs != 0: return pred_abs
-                # if dir_der != 0: return pred_der
                 
                 if dir_abs != 0 and dir_der != 0 and dir_abs != dir_der:
                     pred_val = None # Conflict
@@ -323,12 +341,11 @@ def validate_random_1h_model(engine):
     print(f"\n[FAST VALIDATION] Selected 1h Model: {selected_key}")
     print(f"[FAST VALIDATION] Fetching 216 days (7.2mo) of NATIVE 1h data...")
     
-    if asset_pair not in ASSETS:
-        print(f"Skipped: Asset {asset_pair} not in ASSETS map.")
-        return
+    # Ensure we use the Binance ticker
+    ticker = ASSETS.get(asset_pair, asset_pair)
 
     raw_1h_data = fetch_binance_history_custom(
-        ASSETS[asset_pair]['binance'], 
+        ticker, 
         interval="1h", 
         days=216
     )
@@ -346,7 +363,11 @@ def validate_random_1h_model(engine):
     
     print(f"[FAST VALIDATION] Running backtest on {len(prices)} candles...")
     
-    for i in range(50, len(prices) - 1):
+    # FIX: Loop range adapted for lower slice requirement
+    # We need at least 15 candles. 
+    start_idx = 20 
+    
+    for i in range(start_idx, len(prices) - 1):
         if active_signal != 0:
             change = prices[i] - last_val
             if (active_signal == 1 and change > 0) or (active_signal == -1 and change < 0):
@@ -355,6 +376,7 @@ def validate_random_1h_model(engine):
                 trades += 1
             active_signal = 0
 
+        # FIX: Ensure slice is sufficient (20 > 15)
         current_slice = prices[i-20:i+1]
         sig = engine.predict(asset_pair, "1h", current_slice)
         
@@ -407,8 +429,8 @@ def main():
     
     # --- STEP 2: LOAD LIVE CONTEXT ---
     print("Fetching 7-day 1m history for live operations...")
-    for model_sym, pairs in ASSETS.items():
-        hist = fetch_binance_history_custom(pairs['binance'], interval="1m", days=7)
+    for model_sym, ticker in ASSETS.items():
+        hist = fetch_binance_history_custom(ticker, interval="1m", days=7)
         market.ingest(model_sym, hist)
         
     # --- STEP 3: BACKFILL METRICS ---
@@ -446,20 +468,22 @@ def main():
     print("Entering Live Mode...")
     while True:
         now = datetime.now()
+        # Sleep until 2 seconds into the next minute
         sleep_s = 60 - now.second + 2
         print(f"Waiting {sleep_s}s...")
         time.sleep(sleep_s)
         
         now_dt = datetime.now()
         
-        for model_sym, pairs in ASSETS.items():
-            kraken_pair = pairs['kraken']
-            k_data = fetch_kraken_latest(kraken_pair)
-            if not k_data or len(k_data) < 2: continue
+        for model_sym, ticker in ASSETS.items():
+            # FIX: Use Binance Live data instead of Kraken
+            # This ensures price buckets match the training data
+            bin_data = fetch_binance_latest(ticker)
+            if not bin_data: continue
             
-            closed_candle = k_data[-2]
+            closed_candle = bin_data[0] # List containing one dict
             curr_price = closed_candle['price']
-            market.ingest(model_sym, [closed_candle])
+            market.ingest(model_sym, bin_data)
             
             for tf_name, tf_pd in TIMEFRAMES.items():
                 m = now_dt.minute
@@ -472,10 +496,14 @@ def main():
                 
                 if is_boundary:
                     prev_key = f"{model_sym}_{tf_name}"
+                    
+                    # 1. Check if we need to close an old trade
                     if prev_key in market.last_signal:
                         old = market.last_signal[prev_key]
                         record_trade_result(conn, model_sym, tf_name, old['sig'], old['entry'], curr_price, now_dt)
+                        del market.last_signal[prev_key] # Reset
                     
+                    # 2. Get prediction for next period
                     prices = market.get_prices(model_sym, tf_pd)
                     sig = engine.predict(model_sym, tf_name, prices)
                     
