@@ -60,6 +60,7 @@ HISTORY_LOG = []
 HISTORY_ACCURACY = 0.0
 TOTAL_PNL = 0.0
 LAST_UPDATE = "Never"
+PRICE_CACHE = {}  # Stores the bulk 20-day history per asset for latency optimization
 
 # --- 0. DATABASE SETUP ---
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -151,7 +152,6 @@ def fetch_binance_segment(symbol, start_ts, end_ts):
     segment_candles = []
     current_start = start_ts
     while current_start < end_ts:
-        # Fetch up to 1000 candles per request
         url = f"{base_url}?symbol={symbol}&interval={BASE_INTERVAL}&startTime={current_start}&endTime={end_ts}&limit=1000"
         try:
             with urllib.request.urlopen(url) as response:
@@ -231,16 +231,9 @@ def sync_ohlc_with_github(symbol):
 
     return full_data
 
-def get_binance_recent(symbol, limit=1000):
-    """
-    Fetches the most recent `limit` candles.
-    Optimized for latency by calculating exact start time.
-    BASE_INTERVAL is 15m (900,000 ms).
-    """
-    interval_ms = 900000 
+def get_binance_recent(symbol, days=20):
     end_ts = int(time.time() * 1000)
-    # Add a small buffer (5 candles) to ensure we cover edge cases
-    start_ts = end_ts - (limit * interval_ms) - (5 * interval_ms)
+    start_ts = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
     return fetch_binance_segment(symbol, start_ts, end_ts)
 
 def fetch_models_from_github():
@@ -450,8 +443,10 @@ def populate_weekly_history(models_cache):
     total_valid_moves = 0
     
     for asset in ASSETS:
-        # Optimization: Fetch 2000 candles (approx 21 days) for history/PnL
-        raw_data = get_binance_recent(asset, limit=2000)
+        # Use Cache if available to save time
+        raw_data = PRICE_CACHE.get(asset, [])
+        if not raw_data:
+            raw_data = get_binance_recent(asset, days=20)
         
         for tf_name, model_data in models_cache.get(asset, {}).items():
             strategies = model_data['strategies']
@@ -502,9 +497,7 @@ def populate_weekly_history(models_cache):
                     elif outcome_str == "LOSS":
                         total_valid_moves += 1
                     
-                    # --- PERCENTAGE CHANGE & PNL CALCULATION ---
                     pct_change_raw = ((outcome_price - current_price) / current_price) * 100
-                    
                     direction = 1 if sig == 1 else -1
                     trade_pnl = pct_change_raw * direction
 
@@ -532,7 +525,6 @@ def populate_weekly_history(models_cache):
         
     print(f"Generated {len(HISTORY_LOG)} signals. Strict Acc: {HISTORY_ACCURACY:.2f}%. Total PnL: {TOTAL_PNL:.2f}%")
 
-    # --- SAVE TO DB ---
     if SessionLocal:
         try:
             session = SessionLocal()
@@ -555,24 +547,78 @@ def populate_weekly_history(models_cache):
         except Exception as e:
             print(f"[DB Error] Could not save history: {e}")
 
-# --- 5. LIVE SERVER ---
+# --- 5. LIVE SERVER & LATENCY OPTIMIZATION ---
+
+def prefetch_bulk_data():
+    """
+    Runs 10s before the candle close.
+    Fetches the last 20 days of data to warm up the cache.
+    """
+    global PRICE_CACHE
+    print(f"\n[Prefetch] Warming up data cache at {datetime.now().strftime('%H:%M:%S')}...")
+    
+    for asset in ASSETS:
+        try:
+            raw_data = get_binance_recent(asset, days=20)
+            PRICE_CACHE[asset] = raw_data
+        except Exception as e:
+            print(f"[{asset}] Prefetch failed: {e}")
+        
+    print(f"[Prefetch] Cache warmed for {len(ASSETS)} assets.")
 
 def update_live_signals(models_cache):
-    global SIGNAL_MATRIX, LAST_UPDATE
-    print(f"\n[Scheduler] Updating signals at {datetime.now().strftime('%H:%M:%S')}...")
+    """
+    Runs exactly at :00, :15, :30, :45.
+    Fetches ONLY the latest tiny segment and merges with cache.
+    """
+    global SIGNAL_MATRIX, LAST_UPDATE, PRICE_CACHE
+    print(f"\n[Scheduler] Executing Signals at {datetime.now().strftime('%H:%M:%S')}...")
+    
     temp_matrix = {}
     
     for asset in ASSETS:
         temp_matrix[asset] = {}
-        # Optimization: Fetch 1000 candles (approx 10 days) for live inference
-        # 4H candles require ~960 candles for proper history, so 1000 is safe.
-        raw_data = get_binance_recent(asset, limit=1000)
         
+        # 1. Retrieve Bulk History from Cache
+        history_data = PRICE_CACHE.get(asset, [])
+        
+        full_data = []
+        # If cache is empty (server just started), fallback to full fetch
+        if not history_data:
+            print(f"[{asset}] Cache miss, performing full fetch...")
+            full_data = get_binance_recent(asset, days=20)
+            PRICE_CACHE[asset] = full_data # update cache
+        else:
+            # 2. fast-fetch ONLY the newest data (last 5 minutes)
+            # This grabs the just-closed candle and the brand new open candle
+            now_ts = int(time.time() * 1000)
+            start_tiny_fetch = now_ts - (5 * 60 * 1000) # Look back 5 mins
+            
+            try:
+                new_segment = fetch_binance_segment(asset, start_tiny_fetch, now_ts)
+                
+                # 3. Merge: Dictionary merge to deduplicate by timestamp
+                data_dict = {x[0]: x[1] for x in history_data}
+                for ts, price in new_segment:
+                    data_dict[ts] = price
+                    
+                # Convert back to sorted list
+                full_data = sorted([(k, v) for k, v in data_dict.items()])
+                
+                # Update cache lightly
+                PRICE_CACHE[asset] = full_data
+            except Exception as e:
+                print(f"[{asset}] Error in fast-fetch merge: {e}")
+                full_data = history_data # Fallback to what we have
+
+        # --- INFERENCE ---
         for tf_name, model_data in models_cache.get(asset, {}).items():
             strategies = model_data['strategies']
             tf_pandas = TIMEFRAMES[tf_name]
-            prices = resample_prices(raw_data, tf_pandas)
+            prices = resample_prices(full_data, tf_pandas)
             
+            # Standard logic: remove last candle if it's the brand new open one
+            # to signal based on the 'just closed' candle
             if prices:
                 prices = prices[:-1]
             
@@ -582,27 +628,23 @@ def update_live_signals(models_cache):
     SIGNAL_MATRIX = temp_matrix
     LAST_UPDATE = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    # --- SAVE MATRIX TO DB ---
+    # Save Matrix to DB
     if SessionLocal:
         try:
             session = SessionLocal()
             session.query(MatrixEntry).delete()
             for asset, tfs in temp_matrix.items():
                 for tf, val in tfs.items():
-                    entry = MatrixEntry(
-                        asset=asset,
-                        tf=tf,
-                        signal_val=val
-                    )
+                    entry = MatrixEntry(asset=asset, tf=tf, signal_val=val)
                     session.add(entry)
             session.commit()
             session.close()
-            print("[DB] Live Signal Matrix saved to Database.")
+            print("[DB] Live Signal Matrix saved.")
         except Exception as e:
-            print(f"[DB Error] Could not save matrix: {e}")
+            print(f"[DB Error] {e}")
     
     populate_weekly_history(models_cache)
-    print("[Scheduler] Signals Updated.")
+    print("[Scheduler] Execution Complete.")
 
 app = Flask(__name__)
 
@@ -698,7 +740,6 @@ def home():
         cls = "buy" if log['signal'] == "BUY" else "sell"
         res_cls = log['outcome'] # WIN, LOSS, NOISE
         
-        # Color coding the PnL
         pnl_val = log['pnl']
         pnl_cls = "pos-pnl" if pnl_val >= 0 else "neg-pnl"
         pnl_txt = f"{pnl_val:+.2f}%"
@@ -719,12 +760,24 @@ def home():
     return render_template_string(html)
 
 def run_scheduler(models_cache):
-    print("Initializing Live Scheduler...")
+    print("Initializing Optimized Two-Step Scheduler...")
+    
+    # Initial run to populate data immediately
+    prefetch_bulk_data()
     update_live_signals(models_cache)
-    schedule.every().hour.at(":00").do(update_live_signals, models_cache)
-    schedule.every().hour.at(":15").do(update_live_signals, models_cache)
-    schedule.every().hour.at(":30").do(update_live_signals, models_cache)
-    schedule.every().hour.at(":45").do(update_live_signals, models_cache)
+    
+    # --- PREFETCH JOBS (10 seconds before the mark) ---
+    schedule.every().hour.at("14:50").do(prefetch_bulk_data)
+    schedule.every().hour.at("29:50").do(prefetch_bulk_data)
+    schedule.every().hour.at("44:50").do(prefetch_bulk_data)
+    schedule.every().hour.at("59:50").do(prefetch_bulk_data)
+    
+    # --- EXECUTION JOBS (Exactly on the mark) ---
+    schedule.every().hour.at("00:00").do(update_live_signals, models_cache)
+    schedule.every().hour.at("15:00").do(update_live_signals, models_cache)
+    schedule.every().hour.at("30:00").do(update_live_signals, models_cache)
+    schedule.every().hour.at("45:00").do(update_live_signals, models_cache)
+    
     while True:
         schedule.run_pending()
         time.sleep(1)
@@ -733,7 +786,6 @@ if __name__ == "__main__":
     models = fetch_models_from_github()
     if run_strict_verification(models):
         print("\n>>> VERIFICATION SUCCESSFUL. STARTING LIVE SERVER. <<<")
-        # Pre-populate history/PnL on startup
         populate_weekly_history(models)
         t = threading.Thread(target=run_scheduler, args=(models,))
         t.daemon = True
