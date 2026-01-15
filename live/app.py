@@ -6,9 +6,7 @@ import threading
 import schedule
 import pandas as pd
 import urllib.request
-import base64
-from io import StringIO
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from collections import Counter
 from flask import Flask, render_template_string
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -165,7 +163,7 @@ def fetch_binance_candles(symbol, limit=1000, start_time=None):
 
 def update_asset_cache_live(asset):
     global PRICE_CACHE
-    recent_candles = fetch_binance_candles(asset, limit=5)
+    recent_candles = fetch_binance_candles(asset, limit=10) # Fetch slightly more to be safe
     if not recent_candles: return
 
     with CACHE_LOCK:
@@ -174,7 +172,10 @@ def update_asset_cache_live(asset):
         for ts, price in recent_candles:
             data_dict[ts] = price
         sorted_items = sorted(data_dict.items())
-        if len(sorted_items) > 2500: sorted_items = sorted_items[-2500:]
+        
+        # INCREASED BUFFER: 15,000 candles (approx 150 days)
+        # This ensures 1d and 4h timeframes have enough data to form sequences
+        if len(sorted_items) > 15000: sorted_items = sorted_items[-15000:]
         PRICE_CACHE[asset] = sorted_items
 
 # --- 3. GITHUB SYNC (FULL) ---
@@ -285,11 +286,11 @@ def get_prediction(model_type, abs_map, der_map, a_seq, d_seq, last_val, all_val
     return None
 
 def generate_signal(prices, strategies):
-    if not strategies: return 0
+    if not strategies: return 0, "No Strategy"
     active_directions = []
     
     max_seq_len = max(s['seq_len'] for s in strategies)
-    if len(prices) < max_seq_len + 1: return 0
+    if len(prices) < max_seq_len + 1: return 0, "Insufficient Data"
 
     for model in strategies:
         b_size = model['bucket_size']
@@ -319,12 +320,12 @@ def generate_signal(prices, strategies):
             direction = 1 if pred_diff > 0 else -1
             active_directions.append(direction)
             
-    if not active_directions: return 0
+    if not active_directions: return 0, "Neutral/Abstain"
     up = active_directions.count(1)
     down = active_directions.count(-1)
-    if up > down: return 1
-    elif down > up: return -1
-    return 0
+    if up > down: return 1, "Buy"
+    elif down > up: return -1, "Sell"
+    return 0, "Mixed Signals"
 
 # --- 5. VERIFICATION & HISTORY ---
 
@@ -419,7 +420,8 @@ def run_strict_verification(models_cache):
             
         if asset_passed:
             with CACHE_LOCK:
-                PRICE_CACHE[asset] = full_raw_data[-2500:] 
+                # INCREASED LIVE BUFFER to 15,000 to support high timeframe strategies
+                PRICE_CACHE[asset] = full_raw_data[-15000:] 
         
         return asset_passed
 
@@ -435,22 +437,19 @@ def populate_weekly_history(models_cache):
     global HISTORY_LOG, HISTORY_ACCURACY
     logs = []
     
-    # Use UTC to align with Binance
-    cutoff_time = datetime.utcnow() - timedelta(days=7)
-    print(f"\n[HISTORY DEBUG] Cutoff: {cutoff_time} (UTC)")
+    # Use timezone-aware UTC
+    cutoff_time = datetime.now(timezone.utc) - timedelta(days=7)
+    print(f"\n[HISTORY DIAGNOSTIC] Cutoff: {cutoff_time}")
     
     total_wins = 0
     total_valid_moves = 0
     
+    # Statistics for debugging
+    stats = {"Checked": 0, "Filtered_Time": 0, "Signal_0": 0, "Signal_Valid": 0}
+    
     for asset in ASSETS:
         with CACHE_LOCK:
             raw_data = list(PRICE_CACHE[asset]) 
-        
-        # DEBUG: Check first asset's range
-        if len(raw_data) > 0 and asset == "BTCUSDT":
-             first_ts = datetime.utcfromtimestamp(raw_data[0][0]/1000)
-             last_ts = datetime.utcfromtimestamp(raw_data[-1][0]/1000)
-             print(f"[HISTORY DEBUG] BTCUSDT Data Range: {first_ts} -> {last_ts}")
 
         for tf_name, model_data in models_cache.get(asset, {}).items():
             strategies = model_data['strategies']
@@ -467,30 +466,35 @@ def populate_weekly_history(models_cache):
             
             max_seq = max(s['seq_len'] for s in strategies)
             start_idx = max_seq + 1
+            
+            # DIAGNOSTIC PRINT for the first asset to prove loop bounds
+            if asset == "BTCUSDT" and tf_name == "1d":
+                 print(f"[DEBUG] BTCUSDT 1d: Total Candles={len(prices)}, Loop Start={start_idx}")
+
             if len(prices) <= start_idx: continue
             
-            # Counter for how many checks we actually did
-            check_count = 0
-            
             for i in range(start_idx, len(prices) - 1): 
+                # Ensure timestamp is timezone-aware for comparison
                 target_ts = timestamps[i]
+                if target_ts.tzinfo is None:
+                    target_ts = target_ts.replace(tzinfo=timezone.utc)
+
+                stats["Checked"] += 1
                 
-                # DATE FILTER DEBUG
                 if target_ts < cutoff_time: 
+                    stats["Filtered_Time"] += 1
                     continue
-                
-                check_count += 1
+
                 hist_prices = prices[:i]
                 current_price = prices[i-1]
                 outcome_price = prices[i]
                 
-                sig = generate_signal(hist_prices, strategies)
+                sig, reason = generate_signal(hist_prices, strategies)
                 
-                # LOGGING ONE SAMPLE FOR DEBUGGING
-                if check_count == 1 and asset == "BTCUSDT":
-                    print(f"[HISTORY DEBUG] BTCUSDT First Check @ {target_ts}: Sig={sig}, Price={current_price}")
-
-                if sig != 0:
+                if sig == 0:
+                    stats["Signal_0"] += 1
+                else:
+                    stats["Signal_Valid"] += 1
                     start_bucket = get_bucket(current_price, min_bucket_size)
                     end_bucket = get_bucket(outcome_price, min_bucket_size)
                     bucket_diff = end_bucket - start_bucket
@@ -521,6 +525,8 @@ def populate_weekly_history(models_cache):
                         "pct_change": pct_change
                     })
     
+    print(f"[DIAGNOSTIC] Total Checks: {stats['Checked']} | Too Old: {stats['Filtered_Time']} | Zero Sig: {stats['Signal_0']} | Valid Sig: {stats['Signal_Valid']}")
+
     logs.sort(key=lambda x: x['time'], reverse=True)
     HISTORY_LOG = logs
     HISTORY_ACCURACY = (total_wins / total_valid_moves * 100) if total_valid_moves > 0 else 0.0
@@ -569,11 +575,11 @@ def update_live_signals(models_cache):
             
             if prices: prices = prices[:-1]
             
-            sig = generate_signal(prices, strategies)
+            sig, _ = generate_signal(prices, strategies)
             temp_matrix[asset][tf_name] = sig
             
     SIGNAL_MATRIX = temp_matrix
-    LAST_UPDATE = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    LAST_UPDATE = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     
     if SessionLocal:
         try:
