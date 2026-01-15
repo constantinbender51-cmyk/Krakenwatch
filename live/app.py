@@ -164,38 +164,22 @@ def fetch_binance_candles(symbol, limit=1000, start_time=None):
         return []
 
 def update_asset_cache_live(asset):
-    """
-    Lightweight update for live loop.
-    Fetches only the last few candles to append to existing cache.
-    """
     global PRICE_CACHE
-    
-    # Fetch last 5 candles
     recent_candles = fetch_binance_candles(asset, limit=5)
-    
-    if not recent_candles:
-        return
+    if not recent_candles: return
 
     with CACHE_LOCK:
         current_data = PRICE_CACHE.get(asset, [])
         data_dict = dict(current_data)
         for ts, price in recent_candles:
             data_dict[ts] = price
-        
         sorted_items = sorted(data_dict.items())
-        
-        # Keep ~25 days (2500 candles @ 15m)
-        if len(sorted_items) > 2500:
-            sorted_items = sorted_items[-2500:]
-            
+        if len(sorted_items) > 2500: sorted_items = sorted_items[-2500:]
         PRICE_CACHE[asset] = sorted_items
 
-# --- 3. GITHUB SYNC (FULL HISTORY) ---
+# --- 3. GITHUB SYNC (FULL) ---
 
 def sync_ohlc_full(symbol):
-    """
-    Fetches FULL history for strict verification.
-    """
     print(f"[{symbol}] Loading full history...")
     filename = f"ohlc/{symbol}.csv"
     url = GITHUB_API_BASE + filename
@@ -204,7 +188,6 @@ def sync_ohlc_full(symbol):
     existing_data = []
     last_stored_ts = 0
     
-    # 1. Try GitHub
     try:
         resp = requests.get(url, headers=headers)
         if resp.status_code == 200:
@@ -217,10 +200,8 @@ def sync_ohlc_full(symbol):
                 if not df_exist.empty:
                     existing_data = list(df_exist.itertuples(index=False, name=None))
                     last_stored_ts = int(existing_data[-1][0])
-    except Exception:
-        pass
+    except Exception: pass
 
-    # 2. Fill Gap from Binance
     if last_stored_ts == 0:
         start_ts = int(datetime.strptime(START_DATE, "%Y-%m-%d").timestamp() * 1000)
     else:
@@ -232,13 +213,12 @@ def sync_ohlc_full(symbol):
 
     new_data = []
     curr = start_ts
-    
     while curr < end_ts:
         batch = fetch_binance_candles(symbol, start_time=curr)
         if not batch: break
         new_data.extend(batch)
         curr = batch[-1][0] + 1
-        time.sleep(0.05) 
+        time.sleep(0.05)
         if len(batch) < 500: break
 
     full_data = existing_data + new_data
@@ -272,7 +252,6 @@ def fetch_models_from_github():
                             "all_vals": params["all_vals"],
                             "all_changes": params["all_changes"]
                         })
-                    
                     models_cache[asset][tf] = {
                         "strategies": strategies,
                         "expected_acc": file_content.get("combined_accuracy", 0),
@@ -343,12 +322,11 @@ def generate_signal(prices, strategies):
     if not active_directions: return 0
     up = active_directions.count(1)
     down = active_directions.count(-1)
-    
     if up > down: return 1
     elif down > up: return -1
     return 0
 
-# --- 5. VERIFICATION ---
+# --- 5. VERIFICATION & HISTORY ---
 
 def run_strict_verification(models_cache):
     print("\n========================================")
@@ -441,7 +419,6 @@ def run_strict_verification(models_cache):
             
         if asset_passed:
             with CACHE_LOCK:
-                # Keep 2500 candles (approx 26 days)
                 PRICE_CACHE[asset] = full_raw_data[-2500:] 
         
         return asset_passed
@@ -458,8 +435,9 @@ def populate_weekly_history(models_cache):
     global HISTORY_LOG, HISTORY_ACCURACY
     logs = []
     
-    # FIX: Use UTC now
+    # Use UTC to align with Binance
     cutoff_time = datetime.utcnow() - timedelta(days=7)
+    print(f"\n[HISTORY DEBUG] Cutoff: {cutoff_time} (UTC)")
     
     total_wins = 0
     total_valid_moves = 0
@@ -468,14 +446,16 @@ def populate_weekly_history(models_cache):
         with CACHE_LOCK:
             raw_data = list(PRICE_CACHE[asset]) 
         
-        # DEBUG LOGGING (First time check)
+        # DEBUG: Check first asset's range
         if len(raw_data) > 0 and asset == "BTCUSDT":
              first_ts = datetime.utcfromtimestamp(raw_data[0][0]/1000)
              last_ts = datetime.utcfromtimestamp(raw_data[-1][0]/1000)
-             print(f"[DEBUG] BTCUSDT Cache Size: {len(raw_data)} | Range: {first_ts} -> {last_ts}")
+             print(f"[HISTORY DEBUG] BTCUSDT Data Range: {first_ts} -> {last_ts}")
 
         for tf_name, model_data in models_cache.get(asset, {}).items():
             strategies = model_data['strategies']
+            if not strategies: continue
+
             tf_pandas = TIMEFRAMES[tf_name]
             min_bucket_size = min(s['bucket_size'] for s in strategies)
             
@@ -489,18 +469,27 @@ def populate_weekly_history(models_cache):
             start_idx = max_seq + 1
             if len(prices) <= start_idx: continue
             
+            # Counter for how many checks we actually did
+            check_count = 0
+            
             for i in range(start_idx, len(prices) - 1): 
                 target_ts = timestamps[i]
                 
-                # STRICT FILTER
-                if target_ts < cutoff_time: continue
-
+                # DATE FILTER DEBUG
+                if target_ts < cutoff_time: 
+                    continue
+                
+                check_count += 1
                 hist_prices = prices[:i]
                 current_price = prices[i-1]
                 outcome_price = prices[i]
                 
                 sig = generate_signal(hist_prices, strategies)
                 
+                # LOGGING ONE SAMPLE FOR DEBUGGING
+                if check_count == 1 and asset == "BTCUSDT":
+                    print(f"[HISTORY DEBUG] BTCUSDT First Check @ {target_ts}: Sig={sig}, Price={current_price}")
+
                 if sig != 0:
                     start_bucket = get_bucket(current_price, min_bucket_size)
                     end_bucket = get_bucket(outcome_price, min_bucket_size)
@@ -557,7 +546,7 @@ def populate_weekly_history(models_cache):
             session.close()
         except Exception: pass
 
-# --- 6. LIVE SERVER & FAST SCHEDULER ---
+# --- 6. LIVE SERVER ---
 
 def update_live_signals(models_cache):
     global SIGNAL_MATRIX, LAST_UPDATE
