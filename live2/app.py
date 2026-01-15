@@ -19,18 +19,12 @@ try:
 except ImportError:
     pass
 
-# GitHub Config
 GITHUB_PAT = os.getenv("PAT")
 REPO_OWNER = os.getenv("REPO_OWNER", "constantinbender51-cmyk")
 REPO_NAME = os.getenv("REPO_NAME", "model-2")
 GITHUB_API_URL = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/"
-
-# Database Config
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Asset Mapping
-# Binance (for history) -> Kraken (for live)
-# Format: { "Model_Symbol": {"binance": "Symbol", "kraken": "Symbol"} }
 ASSETS = {
     "BTCUSDT": {"binance": "BTCUSDT", "kraken": "XBTUSD"},
     "ETHUSDT": {"binance": "ETHUSDT", "kraken": "ETHUSD"},
@@ -46,7 +40,7 @@ TIMEFRAMES = {
 }
 
 # =========================================
-# 2. DATABASE (Strict Schema)
+# 2. DATABASE
 # =========================================
 
 def get_db_connection():
@@ -56,11 +50,8 @@ def init_db():
     conn = get_db_connection()
     cur = conn.cursor()
     
-    # 1. DROP old signals table to ensure schema matches strict requirements
-    #    (It only holds active signals, so no long-term history is lost)
+    # Reset Signals Table (Active Snapshot)
     cur.execute("DROP TABLE IF EXISTS signals;")
-    
-    # 2. Strict Signal Table (Snapshot of ACTIVE signals only)
     cur.execute("""
         CREATE TABLE signals (
             asset VARCHAR(20) NOT NULL,
@@ -72,7 +63,7 @@ def init_db():
         );
     """)
 
-    # 3. Secondary History Table (For Metrics) - We KEEP this one safe
+    # History Table (Metrics)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS history (
             id SERIAL PRIMARY KEY,
@@ -89,13 +80,9 @@ def init_db():
     conn.commit()
     cur.close()
     conn.close()
-    print("Database initialized (Signals table reset).")
-
+    print("Database initialized.")
 
 def overwrite_signal(conn, asset, tf, signal, start_dt, end_dt):
-    """
-    Upsert: Overwrites the row if (asset, tf) exists.
-    """
     try:
         cur = conn.cursor()
         query = """
@@ -111,32 +98,27 @@ def overwrite_signal(conn, asset, tf, signal, start_dt, end_dt):
         conn.commit()
         cur.close()
     except Exception as e:
-        print(f"[DB Error] Signal Overwrite Failed: {e}")
+        print(f"[DB Error] Signal Overwrite: {e}")
 
-def record_trade_result(conn, asset, tf, signal, entry_price, exit_price):
-    """Saves completed trade to history for PnL tracking."""
+def record_trade_result(conn, asset, tf, signal, entry_price, exit_price, timestamp_dt):
     if signal == 0 or entry_price == 0: return
-    
-    # PnL logic: (Exit - Entry) / Entry * Direction
     pnl = ((exit_price - entry_price) / entry_price) * signal
     
     try:
         cur = conn.cursor()
         cur.execute("""
-            INSERT INTO history (asset, timeframe, signal, entry_price, exit_price, pnl_pct)
-            VALUES (%s, %s, %s, %s, %s, %s)
-        """, (asset, tf, int(signal), float(entry_price), float(exit_price), float(pnl)))
+            INSERT INTO history (asset, timeframe, signal, entry_price, exit_price, pnl_pct, closed_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """, (asset, tf, int(signal), float(entry_price), float(exit_price), float(pnl), timestamp_dt))
         conn.commit()
         cur.close()
     except Exception as e:
-        print(f"[DB Error] History Save Failed: {e}")
+        print(f"[DB Error] History Save: {e}")
 
 def compute_7d_metrics(conn):
-    """Calculates accuracy and PnL from the history table."""
     try:
         cur = conn.cursor()
         since = datetime.now() - timedelta(days=7)
-        
         cur.execute("""
             SELECT 
                 COUNT(*) as total,
@@ -145,111 +127,63 @@ def compute_7d_metrics(conn):
             FROM history
             WHERE closed_at >= %s
         """, (since,))
-        
         row = cur.fetchone()
         cur.close()
         
         if row and row[0] > 0:
-            total = row[0]
-            wins = row[1]
-            pnl = row[2]
-            acc = (wins / total) * 100
-            print(f"\n--- 7 Day Metrics ---")
-            print(f"Trades: {total} | Accuracy: {acc:.2f}% | PnL: {pnl*100:.2f}%")
+            acc = (row[1] / row[0]) * 100
+            print(f"\n[METRICS] Trades: {row[0]} | Acc: {acc:.2f}% | PnL: {row[2]*100:.2f}%")
         else:
-            print("\n--- 7 Day Metrics: No closed trades yet ---")
-            
-    except Exception as e:
-        print(f"Metrics Error: {e}")
+            print("\n[METRICS] No closed trades yet.")
+    except Exception:
+        pass
 
 # =========================================
-# 3. DATA FETCHING (Hybrid)
+# 3. DATA & STRATEGY
 # =========================================
 
 def fetch_binance_history_7d(symbol):
-    """
-    Fetches ~7 days of 1m data from Binance.
-    Binance limit is 1000 candles per call. 7 days * 1440 mins = ~10080 candles.
-    We need to loop.
-    """
+    """Fetch 7 days of 1m data"""
     base_url = "https://api.binance.com/api/v3/klines"
-    interval = "1m"
     end_time = int(time.time() * 1000)
     start_time = end_time - (7 * 24 * 60 * 60 * 1000)
     
     all_candles = []
     current_start = start_time
     
-    print(f"[{symbol}] Fetching Binance History...", end=" ")
-    
+    print(f"[{symbol}] Downloading History...", end=" ")
     while current_start < end_time:
-        params = {
-            "symbol": symbol,
-            "interval": interval,
-            "startTime": current_start,
-            "limit": 1000
-        }
         try:
-            r = requests.get(base_url, params=params)
+            r = requests.get(base_url, params={"symbol": symbol, "interval": "1m", "startTime": current_start, "limit": 1000})
             data = r.json()
+            if not data or not isinstance(data, list): break
             
-            if not isinstance(data, list): break
-            if not data: break
-            
-            # Binance format: [time, open, high, low, close, ...]
-            # We only need [time, close]
             batch = [{"timestamp": int(c[0]), "price": float(c[4])} for c in data]
             all_candles.extend(batch)
-            
             current_start = batch[-1]["timestamp"] + 1
-            time.sleep(0.1) # Respect rate limits
+            time.sleep(0.05)
+        except: break
             
-        except Exception as e:
-            print(f"Err: {e}")
-            break
-            
-    print(f"Done. ({len(all_candles)} candles)")
+    print(f"Done ({len(all_candles)} candles).")
     return all_candles
 
 def fetch_kraken_latest(pair):
-    """
-    Fetches the latest candles from Kraken Public API.
-    Used for the live loop.
-    """
-    url = f"https://api.kraken.com/0/public/OHLC?pair={pair}&interval=1"
     try:
-        r = requests.get(url, timeout=5)
-        data = r.json()
-        
-        if data.get('error'):
-            # Handle standard Kraken errors
-            return None
-            
-        # Kraken returns {"result": { "XBTUSD": [[time, ..., close], ...] }}
-        # Key name is dynamic, so we grab the first list in 'result'
-        res = data.get('result', {})
+        r = requests.get(f"https://api.kraken.com/0/public/OHLC?pair={pair}&interval=1", timeout=5)
+        res = r.json().get('result', {})
         for k, v in res.items():
             if k != "last" and isinstance(v, list):
-                # Return last 2 candles (current open and previous closed)
-                # Format: [time(sec), open, high, low, close, ...]
                 return [{"timestamp": int(c[0]) * 1000, "price": float(c[4])} for c in v[-2:]]
-                
-    except Exception:
-        pass
+    except: pass
     return None
-
-# =========================================
-# 4. TRADING ENGINE
-# =========================================
 
 class MarketBuffer:
     def __init__(self):
-        self.data = {} # { "BTCUSDT": DataFrame }
-        self.last_signal = {} # { "BTCUSDT_1m": {"signal": 0, "entry": 0} }
+        self.data = {} 
+        self.last_signal = {} 
 
     def ingest(self, asset, candles_list):
         if not candles_list: return
-        
         df = pd.DataFrame(candles_list)
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('timestamp', inplace=True)
@@ -257,52 +191,50 @@ class MarketBuffer:
         if asset not in self.data:
             self.data[asset] = df
         else:
-            # Upsert/Append logic for Pandas
-            # Combine, remove duplicates (keep last), sort
             combined = pd.concat([self.data[asset], df])
             combined = combined[~combined.index.duplicated(keep='last')]
-            self.data[asset] = combined.sort_index().iloc[-15000:] # Keep ~10 days
+            self.data[asset] = combined.sort_index().iloc[-15000:]
 
     def get_prices(self, asset, tf_alias):
         if asset not in self.data: return []
         df = self.data[asset]
-        if tf_alias == "1min":
-            return df['price'].tolist()
-        
-        # Resample
-        return df['price'].resample(tf_alias).last().dropna().tolist()
+        if tf_alias == "1min": return df['price'] # Return Series for index access
+        return df['price'].resample(tf_alias).last().dropna()
 
 class StrategyLoader:
     def __init__(self):
         self.models = {}
 
     def load(self):
-        if not GITHUB_PAT:
-            print("WARNING: No PAT. Models cannot be loaded.")
-            return
-
-        headers = {"Authorization": f"Bearer {GITHUB_PAT}"}
+        if not GITHUB_PAT: return
         try:
-            r = requests.get(GITHUB_API_URL, headers=headers)
-            files = r.json()
-            
-            for f in files:
+            r = requests.get(GITHUB_API_URL, headers={"Authorization": f"Bearer {GITHUB_PAT}"})
+            for f in r.json():
                 if f['name'].endswith(".json") and "_" in f['name']:
-                    # Download
-                    content = requests.get(f['download_url']).json()
+                    data = requests.get(f['download_url']).json()
                     key = f['name'].replace(".json", "")
-                    self.models[key] = content.get('strategies', [])
-                    print(f"Loaded: {key}")
+                    self.models[key] = data.get('strategies', [])
+                    print(f"Loaded Model: {key}")
         except Exception as e:
-            print(f"Model Load Error: {e}")
+            print(f"Model Load Failed: {e}")
 
     def get_bucket(self, price, size):
         return int(price // size) if size > 0 else 0
 
-    def predict(self, asset, tf, prices):
+    def predict(self, asset, tf, price_series):
+        """
+        price_series: A pandas Series or list of prices.
+        We predict for the END of the series.
+        """
         key = f"{asset}_{tf}"
         strategies = self.models.get(key, [])
-        if not strategies or len(prices) < 50: return 0
+        if not strategies: return 0
+        
+        # Convert to list for speed
+        if hasattr(price_series, 'tolist'): prices = price_series.tolist()
+        else: prices = price_series
+            
+        if len(prices) < 50: return 0
         
         votes = 0
         for strat in strategies:
@@ -310,49 +242,87 @@ class StrategyLoader:
             p = strat['params']
             s_len = cfg['s_len']
             
-            # Valid sequence length
             if len(prices) < s_len + 1: continue
             
-            # Map prices to buckets
             relevant = prices[-(s_len+1):]
             bkts = [self.get_bucket(v, p['bucket_size']) for v in relevant]
             
-            # Keys
             a_seq = "|".join(map(str, bkts[:-1]))
             d_seq = ""
             if s_len > 1:
-                diffs = [bkts[i] - bkts[i-1] for i in range(1, len(bkts))]
-                d_seq = "|".join(map(str, diffs))
+                d_seq = "|".join(map(str, [bkts[i] - bkts[i-1] for i in range(1, len(bkts))]))
 
-            # Lookups
             pred_val = None
-            
-            # Absolute Model
             if cfg['model'] == "Absolute" and a_seq in p['abs_map']:
-                cands = p['abs_map'][a_seq]
-                pred_val = int(max(cands, key=cands.get))
-            
-            # Derivative Model
+                c = p['abs_map'][a_seq]
+                pred_val = int(max(c, key=c.get))
             elif cfg['model'] == "Derivative" and d_seq in p['der_map']:
-                cands = p['der_map'][d_seq]
-                change = int(max(cands, key=cands.get))
-                pred_val = bkts[-1] + change
-                
-            # Combined
-            elif cfg['model'] == "Combined":
-                 # Simplified for brevity: Only voting if agreement or single model valid
-                 pass 
-
+                c = p['der_map'][d_seq]
+                pred_val = bkts[-1] + int(max(c, key=c.get))
+            
             if pred_val is not None:
                 if pred_val > bkts[-1]: votes += 1
                 elif pred_val < bkts[-1]: votes -= 1
         
-        if votes > 0: return 1
-        if votes < 0: return -1
-        return 0
+        return 1 if votes > 0 else -1 if votes < 0 else 0
 
 # =========================================
-# 5. MAIN EXECUTION
+# 4. BACKFILL LOGIC (Crucial Addition)
+# =========================================
+
+def run_backfill(conn, market, engine):
+    print("\n--- Starting Backfill (Generating History) ---")
+    total_trades = 0
+    
+    for asset in ASSETS.keys():
+        for tf_name, tf_alias in TIMEFRAMES.items():
+            
+            # Check if model exists
+            if f"{asset}_{tf_name}" not in engine.models:
+                continue
+                
+            # Get full price history for this timeframe
+            full_series = market.get_prices(asset, tf_alias)
+            if len(full_series) < 100: continue
+            
+            # We need to loop through history
+            # Start from index 50 (warmup)
+            active_signal = 0
+            entry_price = 0.0
+            
+            # Optimization: Iterate efficiently
+            # We predict at index `i`, signal applies to `i+1` open/close
+            timestamps = full_series.index
+            prices = full_series.values
+            
+            # Simple vector loop
+            for i in range(50, len(prices) - 1):
+                # 1. Close previous trade?
+                # We assume trade closes at the END of this candle (i), 
+                # which is effectively the price we see now.
+                if active_signal != 0:
+                    record_trade_result(conn, asset, tf_name, active_signal, entry_price, prices[i], timestamps[i])
+                    total_trades += 1
+                    active_signal = 0 # Reset
+                
+                # 2. Predict for NEXT candle
+                # We pass the history UP TO 'i' to predict 'i+1'
+                # Slicing is slow, but necessary for correct simulation
+                current_slice = prices[i-20:i+1] # Optimization: Only pass enough for longest sequence (e.g., 20)
+                
+                sig = engine.predict(asset, tf_name, current_slice)
+                
+                # 3. Open new trade
+                if sig != 0:
+                    active_signal = sig
+                    entry_price = prices[i] # We assume we enter at Close of 'i' / Open of 'i+1'
+                    
+            print(f"Backfilled {asset} {tf_name}")
+            
+    print(f"Backfill Complete. {total_trades} historical trades generated.\n")
+
+# =========================================
+# 5. MAIN LOOP
 # =========================================
 
 def main():
@@ -363,49 +333,39 @@ def main():
     engine = StrategyLoader()
     engine.load()
     
-    # 1. INITIAL FETCH (Binance)
-    print("\n--- Initializing with Binance Data ---")
-    for model_symbol, pairs in ASSETS.items():
+    # 1. FETCH
+    for model_sym, pairs in ASSETS.items():
         hist = fetch_binance_history_7d(pairs['binance'])
-        market.ingest(model_symbol, hist)
+        market.ingest(model_sym, hist)
         
-    print("\n--- Starting Live Kraken Loop ---")
+    # 2. BACKFILL (Populate History)
+    run_backfill(conn, market, engine)
+    compute_7d_metrics(conn)
     
+    # 3. LIVE
+    print("Entering Live Mode...")
     while True:
-        # Align to the minute (Wait for :01s)
         now = datetime.now()
-        sleep_s = 60 - now.second + 2 
+        sleep_s = 60 - now.second + 2
         print(f"Waiting {sleep_s}s...")
         time.sleep(sleep_s)
         
         now_dt = datetime.now()
-        print(f"[{now_dt.strftime('%H:%M:%S')}] Tick.")
         
-        # 2. LIVE UPDATE (Kraken)
-        for model_symbol, pairs in ASSETS.items():
+        for model_sym, pairs in ASSETS.items():
             kraken_pair = pairs['kraken']
+            k_data = fetch_kraken_latest(kraken_pair)
+            if not k_data or len(k_data) < 2: continue
             
-            # Fetch
-            k_candles = fetch_kraken_latest(kraken_pair)
-            if not k_candles: continue
+            closed_candle = k_data[-2]
+            curr_price = closed_candle['price']
+            market.ingest(model_sym, [closed_candle])
             
-            # Just closed candle is the second to last one usually, 
-            # or strictly the last one if we time it right.
-            # We used 'last 2' in fetcher. k_candles[-1] is current open, k_candles[-2] is closed.
-            if len(k_candles) < 2: continue
-            closed_candle = k_candles[-2]
-            current_price = closed_candle['price']
-            
-            # Update buffer
-            market.ingest(model_symbol, [closed_candle])
-            
-            # 3. PREDICT & UPSERT
             for tf_name, tf_pd in TIMEFRAMES.items():
                 
-                # Check timeframe boundary
-                # 1m: always. 5m: minute % 5 == 0, etc.
-                is_boundary = False
+                # Check Boundary
                 m = now_dt.minute
+                is_boundary = False
                 if tf_name == "1m": is_boundary = True
                 elif tf_name == "5m" and m % 5 == 0: is_boundary = True
                 elif tf_name == "15m" and m % 15 == 0: is_boundary = True
@@ -413,32 +373,24 @@ def main():
                 elif tf_name == "1h" and m == 0: is_boundary = True
                 
                 if is_boundary:
-                    # A. Handle Previous Signal (if any) for Metrics
-                    prev_key = f"{model_symbol}_{tf_name}"
+                    # Retrieve previous active signal to close it
+                    prev_key = f"{model_sym}_{tf_name}"
                     if prev_key in market.last_signal:
-                        last_sig = market.last_signal[prev_key]
-                        record_trade_result(conn, model_symbol, tf_name, last_sig['sig'], last_sig['entry'], current_price)
+                        old = market.last_signal[prev_key]
+                        record_trade_result(conn, model_sym, tf_name, old['sig'], old['entry'], curr_price, now_dt)
                     
-                    # B. Generate New Signal
-                    prices = market.get_prices(model_symbol, tf_pd)
-                    sig = engine.predict(model_symbol, tf_name, prices)
+                    # Predict
+                    prices = market.get_prices(model_sym, tf_pd)
+                    sig = engine.predict(model_sym, tf_name, prices)
                     
-                    # C. Calculate Times
-                    delta_min = int(tf_pd.replace("min", "").replace("H", "60").replace("1min", "1"))
-                    if tf_name == "1h": delta_min = 60
-                    
-                    start_time = now_dt
-                    end_time = now_dt + timedelta(minutes=delta_min)
-                    
-                    # D. OVERWRITE DB
-                    overwrite_signal(conn, model_symbol, tf_name, sig, start_time, end_time)
-                    
-                    # E. Store in memory for next loop's PnL calc
-                    market.last_signal[prev_key] = {"sig": sig, "entry": current_price}
-                    
-                    print(f" >> {model_symbol} {tf_name}: {sig}")
-
-        # 4. COMPUTE METRICS (Background)
+                    # Upsert Active
+                    if sig != 0:
+                        delta = int(tf_pd.replace("min","").replace("H","60").replace("1min","1"))
+                        end_t = now_dt + timedelta(minutes=delta)
+                        overwrite_signal(conn, model_sym, tf_name, sig, now_dt, end_t)
+                        market.last_signal[prev_key] = {"sig": sig, "entry": curr_price}
+                        print(f">> {model_sym} {tf_name}: SIGNAL {sig}")
+        
         compute_7d_metrics(conn)
 
 if __name__ == "__main__":
