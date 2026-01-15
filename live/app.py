@@ -58,7 +58,7 @@ TIMEFRAMES = {
 SIGNAL_MATRIX = {}
 HISTORY_LOG = []
 HISTORY_ACCURACY = 0.0
-TOTAL_PNL = 0.0  # New Global for PnL
+TOTAL_PNL = 0.0
 LAST_UPDATE = "Never"
 
 # --- 0. DATABASE SETUP ---
@@ -89,7 +89,7 @@ class HistoryEntry(Base):
     price_at_signal = Column(Float)
     outcome = Column(String)
     close_price = Column(Float)
-    pnl = Column(Float) # Added PnL column
+    pnl = Column(Float)
     updated_at = Column(DateTime, default=datetime.utcnow)
 
 class MatrixEntry(Base):
@@ -151,6 +151,7 @@ def fetch_binance_segment(symbol, start_ts, end_ts):
     segment_candles = []
     current_start = start_ts
     while current_start < end_ts:
+        # Fetch up to 1000 candles per request
         url = f"{base_url}?symbol={symbol}&interval={BASE_INTERVAL}&startTime={current_start}&endTime={end_ts}&limit=1000"
         try:
             with urllib.request.urlopen(url) as response:
@@ -230,9 +231,16 @@ def sync_ohlc_with_github(symbol):
 
     return full_data
 
-def get_binance_recent(symbol, days=20):
+def get_binance_recent(symbol, limit=1000):
+    """
+    Fetches the most recent `limit` candles.
+    Optimized for latency by calculating exact start time.
+    BASE_INTERVAL is 15m (900,000 ms).
+    """
+    interval_ms = 900000 
     end_ts = int(time.time() * 1000)
-    start_ts = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
+    # Add a small buffer (5 candles) to ensure we cover edge cases
+    start_ts = end_ts - (limit * interval_ms) - (5 * interval_ms)
     return fetch_binance_segment(symbol, start_ts, end_ts)
 
 def fetch_models_from_github():
@@ -442,7 +450,8 @@ def populate_weekly_history(models_cache):
     total_valid_moves = 0
     
     for asset in ASSETS:
-        raw_data = get_binance_recent(asset, days=20)
+        # Optimization: Fetch 2000 candles (approx 21 days) for history/PnL
+        raw_data = get_binance_recent(asset, limit=2000)
         
         for tf_name, model_data in models_cache.get(asset, {}).items():
             strategies = model_data['strategies']
@@ -494,12 +503,8 @@ def populate_weekly_history(models_cache):
                         total_valid_moves += 1
                     
                     # --- PERCENTAGE CHANGE & PNL CALCULATION ---
-                    # Raw price movement %
                     pct_change_raw = ((outcome_price - current_price) / current_price) * 100
                     
-                    # Trade PnL (Adjusted for direction: Buy + and PriceUp = +PnL; Sell - and PriceDown = +PnL)
-                    # If Signal is 1 (BUY), PnL is pct_change_raw.
-                    # If Signal is -1 (SELL), PnL is -pct_change_raw (Inverse).
                     direction = 1 if sig == 1 else -1
                     trade_pnl = pct_change_raw * direction
 
@@ -523,7 +528,6 @@ def populate_weekly_history(models_cache):
     else:
         HISTORY_ACCURACY = 0.0
         
-    # CALCULATE TOTAL CUMULATIVE PNL (Sum of all trade PnLs)
     TOTAL_PNL = sum(log['pnl'] for log in HISTORY_LOG)
         
     print(f"Generated {len(HISTORY_LOG)} signals. Strict Acc: {HISTORY_ACCURACY:.2f}%. Total PnL: {TOTAL_PNL:.2f}%")
@@ -560,7 +564,9 @@ def update_live_signals(models_cache):
     
     for asset in ASSETS:
         temp_matrix[asset] = {}
-        raw_data = get_binance_recent(asset, days=20)
+        # Optimization: Fetch 1000 candles (approx 10 days) for live inference
+        # 4H candles require ~960 candles for proper history, so 1000 is safe.
+        raw_data = get_binance_recent(asset, limit=1000)
         
         for tf_name, model_data in models_cache.get(asset, {}).items():
             strategies = model_data['strategies']
@@ -727,6 +733,7 @@ if __name__ == "__main__":
     models = fetch_models_from_github()
     if run_strict_verification(models):
         print("\n>>> VERIFICATION SUCCESSFUL. STARTING LIVE SERVER. <<<")
+        # Pre-populate history/PnL on startup
         populate_weekly_history(models)
         t = threading.Thread(target=run_scheduler, args=(models,))
         t.daemon = True
