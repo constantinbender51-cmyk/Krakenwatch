@@ -35,7 +35,6 @@ REPO_OWNER = "constantinbender51-cmyk"
 REPO_NAME = "Models"
 GITHUB_API_BASE = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/"
 
-# UPDATED ASSETS LIST (Matches your expanded Octopus/Training set)
 ASSETS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", 
     "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT", "TRXUSDT",
@@ -59,6 +58,7 @@ TIMEFRAMES = {
 SIGNAL_MATRIX = {}
 HISTORY_LOG = []
 HISTORY_ACCURACY = 0.0
+TOTAL_PNL = 0.0  # New Global for PnL
 LAST_UPDATE = "Never"
 
 # --- 0. DATABASE SETUP ---
@@ -67,7 +67,6 @@ SessionLocal = None
 Base = declarative_base()
 
 if DATABASE_URL:
-    # Fix for Railway/Heroku postgres:// vs postgresql://
     if DATABASE_URL.startswith("postgres://"):
         DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
     
@@ -83,20 +82,21 @@ if DATABASE_URL:
 class HistoryEntry(Base):
     __tablename__ = 'signal_history'
     id = Column(Integer, primary_key=True, index=True)
-    time_str = Column(String) # Stored as string to match existing format
+    time_str = Column(String) 
     asset = Column(String)
     tf = Column(String)
     signal = Column(String)
     price_at_signal = Column(Float)
     outcome = Column(String)
     close_price = Column(Float)
+    pnl = Column(Float) # Added PnL column
     updated_at = Column(DateTime, default=datetime.utcnow)
 
 class MatrixEntry(Base):
     __tablename__ = 'live_matrix'
     asset = Column(String, primary_key=True)
     tf = Column(String, primary_key=True)
-    signal_val = Column(Integer) # 1, -1, 0
+    signal_val = Column(Integer)
     updated_at = Column(DateTime, default=datetime.utcnow)
 
 # Create Tables
@@ -432,8 +432,8 @@ def run_strict_verification(models_cache):
     return passed_all
 
 def populate_weekly_history(models_cache):
-    print("\n--- Generating Signal Log & Calculating Strict Accuracy ---")
-    global HISTORY_LOG, HISTORY_ACCURACY
+    print("\n--- Generating Signal Log & Calculating PnL ---")
+    global HISTORY_LOG, HISTORY_ACCURACY, TOTAL_PNL
     logs = []
     
     cutoff_time = datetime.now() - timedelta(days=7)
@@ -493,8 +493,15 @@ def populate_weekly_history(models_cache):
                     elif outcome_str == "LOSS":
                         total_valid_moves += 1
                     
-                    # --- NEW: PERCENTAGE CHANGE CALCULATION ---
-                    pct_change = ((outcome_price - current_price) / current_price) * 100
+                    # --- PERCENTAGE CHANGE & PNL CALCULATION ---
+                    # Raw price movement %
+                    pct_change_raw = ((outcome_price - current_price) / current_price) * 100
+                    
+                    # Trade PnL (Adjusted for direction: Buy + and PriceUp = +PnL; Sell - and PriceDown = +PnL)
+                    # If Signal is 1 (BUY), PnL is pct_change_raw.
+                    # If Signal is -1 (SELL), PnL is -pct_change_raw (Inverse).
+                    direction = 1 if sig == 1 else -1
+                    trade_pnl = pct_change_raw * direction
 
                     logs.append({
                         "time": target_ts.strftime("%Y-%m-%d %H:%M"),
@@ -504,7 +511,8 @@ def populate_weekly_history(models_cache):
                         "price_at_signal": current_price,
                         "outcome": outcome_str,
                         "close_price": outcome_price,
-                        "pct_change": pct_change
+                        "pct_change": pct_change_raw,
+                        "pnl": trade_pnl
                     })
     
     logs.sort(key=lambda x: x['time'], reverse=True)
@@ -515,13 +523,15 @@ def populate_weekly_history(models_cache):
     else:
         HISTORY_ACCURACY = 0.0
         
-    print(f"Generated {len(HISTORY_LOG)} signals. Strict Accuracy: {HISTORY_ACCURACY:.2f}%")
+    # CALCULATE TOTAL CUMULATIVE PNL (Sum of all trade PnLs)
+    TOTAL_PNL = sum(log['pnl'] for log in HISTORY_LOG)
+        
+    print(f"Generated {len(HISTORY_LOG)} signals. Strict Acc: {HISTORY_ACCURACY:.2f}%. Total PnL: {TOTAL_PNL:.2f}%")
 
     # --- SAVE TO DB ---
     if SessionLocal:
         try:
             session = SessionLocal()
-            # We clear old history and replace with re-verified history
             session.query(HistoryEntry).delete()
             for log in logs:
                 entry = HistoryEntry(
@@ -531,8 +541,8 @@ def populate_weekly_history(models_cache):
                     signal=log['signal'],
                     price_at_signal=log['price_at_signal'],
                     outcome=log['outcome'],
-                    close_price=log['close_price']
-                    # pct_change is deliberately excluded from DB to avoid schema migration issues
+                    close_price=log['close_price'],
+                    pnl=log['pnl']
                 )
                 session.add(entry)
             session.commit()
@@ -593,6 +603,8 @@ app = Flask(__name__)
 @app.route('/')
 def home():
     acc_color = "#0f0" if HISTORY_ACCURACY > 50 else "#f00"
+    pnl_color = "#0f0" if TOTAL_PNL >= 0 else "#f00"
+    
     html = f"""
     <html>
     <head>
@@ -609,7 +621,10 @@ def home():
             .WIN {{ color: #0f0; font-weight: bold; }}
             .LOSS {{ color: #f00; font-weight: bold; }}
             .NOISE {{ color: #666; font-style: italic; }}
+            .pos-pnl {{ color: #0f0; }}
+            .neg-pnl {{ color: #f00; }}
             h2 {{ border-bottom: 1px solid #444; padding-bottom: 5px; margin-top: 40px; }}
+            .stats-container {{ display: flex; gap: 40px; margin-bottom: 20px; }}
         </style>
     </head>
     <body>
@@ -646,8 +661,18 @@ def home():
             </tbody>
         </table>
         
-        <h2>Signals (Last 7 Days)</h2>
-        <p>Strict Accuracy (Excluding Noise): <span style="color:{acc_color}; font-size: 1.2em;">{HISTORY_ACCURACY:.2f}%</span></p>
+        <h2>Performance (Last 7 Days)</h2>
+        <div class="stats-container">
+            <div>
+                <strong>Strict Accuracy (Excl. Noise):</strong>
+                <span style="color:{acc_color}; font-size: 1.5em; display:block;">{HISTORY_ACCURACY:.2f}%</span>
+            </div>
+            <div>
+                <strong>Cumulative PnL:</strong>
+                <span style="color:{pnl_color}; font-size: 1.5em; display:block;">{TOTAL_PNL:+.2f}%</span>
+            </div>
+        </div>
+
         <table>
             <thead>
                 <tr>
@@ -656,7 +681,7 @@ def home():
                     <th>Timeframe</th>
                     <th>Signal</th>
                     <th>Price @ Sig</th>
-                    <th>% Change</th>
+                    <th>Trade PnL %</th>
                     <th>Outcome</th>
                 </tr>
             </thead>
@@ -666,7 +691,11 @@ def home():
     for log in HISTORY_LOG[:150]:
         cls = "buy" if log['signal'] == "BUY" else "sell"
         res_cls = log['outcome'] # WIN, LOSS, NOISE
-        pct_txt = f"{log['pct_change']:+.2f}%"
+        
+        # Color coding the PnL
+        pnl_val = log['pnl']
+        pnl_cls = "pos-pnl" if pnl_val >= 0 else "neg-pnl"
+        pnl_txt = f"{pnl_val:+.2f}%"
         
         html += f"""
         <tr>
@@ -675,7 +704,7 @@ def home():
             <td>{log['tf']}</td>
             <td class='{cls}'>{log['signal']}</td>
             <td>{log['price_at_signal']:.4f}</td>
-            <td>{pct_txt}</td>
+            <td class='{pnl_cls}'>{pnl_txt}</td>
             <td class='{res_cls}'>{log['outcome']}</td>
         </tr>
         """
