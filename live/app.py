@@ -6,17 +6,20 @@ import threading
 import schedule
 import pandas as pd
 import urllib.request
-from datetime import datetime, timedelta, timezone
+import base64
+from io import StringIO
+from datetime import datetime, timedelta
 from collections import Counter
-from flask import Flask, render_template_string
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from flask import Flask, jsonify, render_template_string
 
 # --- DATABASE IMPORTS ---
 try:
     from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime
     from sqlalchemy.orm import sessionmaker, declarative_base
+    from sqlalchemy.sql import text
 except ImportError:
     print("Warning: SQLAlchemy not found. DB features will be disabled.")
+    # Dummy classes to prevent crash if libs missing
     class BaseDummy: metadata = type('obj', (object,), {'create_all': lambda x: None})
     declarative_base = lambda: BaseDummy
 
@@ -32,7 +35,7 @@ REPO_OWNER = "constantinbender51-cmyk"
 REPO_NAME = "Models"
 GITHUB_API_BASE = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/"
 
-# Full Asset List
+# UPDATED ASSETS LIST (Matches your expanded Octopus/Training set)
 ASSETS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", 
     "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT", "TRXUSDT",
@@ -52,24 +55,22 @@ TIMEFRAMES = {
     "1d": "1D"
 }
 
-# --- GLOBAL STATE ---
+# Global State
 SIGNAL_MATRIX = {}
 HISTORY_LOG = []
 HISTORY_ACCURACY = 0.0
 LAST_UPDATE = "Never"
 
-# HOT CACHE: Stores raw (timestamp, price) tuples
-PRICE_CACHE = {asset: [] for asset in ASSETS}
-CACHE_LOCK = threading.Lock()
-
-# --- DATABASE SETUP ---
+# --- 0. DATABASE SETUP ---
 DATABASE_URL = os.getenv("DATABASE_URL")
 SessionLocal = None
 Base = declarative_base()
 
 if DATABASE_URL:
+    # Fix for Railway/Heroku postgres:// vs postgresql://
     if DATABASE_URL.startswith("postgres://"):
         DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+    
     try:
         engine = create_engine(DATABASE_URL)
         SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -78,10 +79,11 @@ if DATABASE_URL:
         print(f">>> Database connection failed: {e}")
         DATABASE_URL = None
 
+# Define Models
 class HistoryEntry(Base):
     __tablename__ = 'signal_history'
     id = Column(Integer, primary_key=True, index=True)
-    time_str = Column(String)
+    time_str = Column(String) # Stored as string to match existing format
     asset = Column(String)
     tf = Column(String)
     signal = Column(String)
@@ -94,9 +96,10 @@ class MatrixEntry(Base):
     __tablename__ = 'live_matrix'
     asset = Column(String, primary_key=True)
     tf = Column(String, primary_key=True)
-    signal_val = Column(Integer)
+    signal_val = Column(Integer) # 1, -1, 0
     updated_at = Column(DateTime, default=datetime.utcnow)
 
+# Create Tables
 if DATABASE_URL and engine:
     try:
         Base.metadata.create_all(bind=engine)
@@ -141,57 +144,43 @@ def get_resampled_df(raw_data, target_freq):
     if target_freq is None: return df
     return df['price'].resample(target_freq).last().dropna().to_frame()
 
-# --- 2. DATA FETCHING ---
+# --- 2. DATA MANAGEMENT ---
 
-def fetch_binance_candles(symbol, limit=1000, start_time=None):
+def fetch_binance_segment(symbol, start_ts, end_ts):
     base_url = "https://api.binance.com/api/v3/klines"
-    url = f"{base_url}?symbol={symbol}&interval={BASE_INTERVAL}"
-    
-    if start_time:
-        url += f"&startTime={start_time}&limit=1000"
-    else:
-        url += f"&limit={limit}"
-        
-    try:
-        with urllib.request.urlopen(url, timeout=10) as response:
-            data = json.loads(response.read().decode())
-            if not data: return []
-            return [(int(c[6]), float(c[4])) for c in data]
-    except Exception as e:
-        print(f"[{symbol}] Fetch Error: {e}")
-        return []
+    segment_candles = []
+    current_start = start_ts
+    while current_start < end_ts:
+        url = f"{base_url}?symbol={symbol}&interval={BASE_INTERVAL}&startTime={current_start}&endTime={end_ts}&limit=1000"
+        try:
+            with urllib.request.urlopen(url) as response:
+                data = json.loads(response.read().decode())
+                if not data: break
+                batch = [(int(c[6]), float(c[4])) for c in data]
+                segment_candles.extend(batch)
+                last_time = data[-1][6]
+                if last_time >= end_ts - 1000: break
+                current_start = last_time + 1
+        except Exception as e:
+            print(f"[{symbol}] Error fetching segment: {e}")
+            break
+    return segment_candles
 
-def update_asset_cache_live(asset):
-    global PRICE_CACHE
-    recent_candles = fetch_binance_candles(asset, limit=10) 
-    if not recent_candles: return
-
-    with CACHE_LOCK:
-        current_data = PRICE_CACHE.get(asset, [])
-        data_dict = dict(current_data)
-        for ts, price in recent_candles:
-            data_dict[ts] = price
-        sorted_items = sorted(data_dict.items())
-        
-        # Buffer increased to 15,000 for safety on large TFs
-        if len(sorted_items) > 15000: sorted_items = sorted_items[-15000:]
-        PRICE_CACHE[asset] = sorted_items
-
-# --- 3. GITHUB SYNC (FULL) ---
-
-def sync_ohlc_full(symbol):
-    print(f"[{symbol}] Loading full history...")
+def sync_ohlc_with_github(symbol):
+    print(f"[{symbol}] Syncing OHLC data...")
     filename = f"ohlc/{symbol}.csv"
     url = GITHUB_API_BASE + filename
     headers = {"Authorization": f"Bearer {GITHUB_PAT}"} if GITHUB_PAT else {}
     
     existing_data = []
+    sha = None
     last_stored_ts = 0
     
     try:
         resp = requests.get(url, headers=headers)
         if resp.status_code == 200:
             file_info = resp.json()
+            sha = file_info.get("sha")
             download_url = file_info.get("download_url")
             content_resp = requests.get(download_url)
             if content_resp.status_code == 200:
@@ -200,7 +189,9 @@ def sync_ohlc_full(symbol):
                 if not df_exist.empty:
                     existing_data = list(df_exist.itertuples(index=False, name=None))
                     last_stored_ts = int(existing_data[-1][0])
-    except Exception: pass
+                    print(f"[{symbol}] Found cached data up to {datetime.fromtimestamp(last_stored_ts/1000)}")
+    except Exception as e:
+        print(f"[{symbol}] Could not fetch existing data: {e}")
 
     if last_stored_ts == 0:
         start_ts = int(datetime.strptime(START_DATE, "%Y-%m-%d").timestamp() * 1000)
@@ -212,17 +203,37 @@ def sync_ohlc_full(symbol):
     if end_ts > current_ts: end_ts = current_ts
 
     new_data = []
-    curr = start_ts
-    while curr < end_ts:
-        batch = fetch_binance_candles(symbol, start_time=curr)
-        if not batch: break
-        new_data.extend(batch)
-        curr = batch[-1][0] + 1
-        time.sleep(0.05)
-        if len(batch) < 500: break
-
+    if start_ts < end_ts:
+        print(f"[{symbol}] Fetching new data from Binance...")
+        new_data = fetch_binance_segment(symbol, start_ts, end_ts)
+        print(f"[{symbol}] Fetched {len(new_data)} new candles.")
+    
     full_data = existing_data + new_data
+    
+    if new_data and full_data:
+        try:
+            df_full = pd.DataFrame(full_data, columns=["timestamp", "price"])
+            csv_buffer = StringIO()
+            df_full.to_csv(csv_buffer, header=False, index=False)
+            csv_content = csv_buffer.getvalue()
+            b64_content = base64.b64encode(csv_content.encode('utf-8')).decode('utf-8')
+            payload = {
+                "message": f"Update {symbol} OHLC data",
+                "content": b64_content,
+                "branch": "main"
+            }
+            if sha: payload["sha"] = sha
+            requests.put(url, headers=headers, json=payload)
+            print(f"[{symbol}] Saved updated OHLC to GitHub.")
+        except Exception as e:
+            print(f"[{symbol}] Error saving to GitHub: {e}")
+
     return full_data
+
+def get_binance_recent(symbol, days=20):
+    end_ts = int(time.time() * 1000)
+    start_ts = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
+    return fetch_binance_segment(symbol, start_ts, end_ts)
 
 def fetch_models_from_github():
     print("--- Downloading Strategies from GitHub ---")
@@ -252,37 +263,43 @@ def fetch_models_from_github():
                             "all_vals": params["all_vals"],
                             "all_changes": params["all_changes"]
                         })
+                    
                     models_cache[asset][tf] = {
                         "strategies": strategies,
                         "expected_acc": file_content.get("combined_accuracy", 0),
                         "expected_trades": file_content.get("combined_trades", 0)
                     }
+                    print(f"[{asset}] Loaded {tf} models.")
             except Exception as e:
                 print(f"Error downloading {filename}: {e}")
     return models_cache
 
-# --- 4. INFERENCE ---
+# --- 3. INFERENCE LOGIC ---
 
 def get_prediction(model_type, abs_map, der_map, a_seq, d_seq, last_val, all_vals, all_changes):
     if model_type == "Absolute":
         if a_seq in abs_map: 
             return abs_map[a_seq].most_common(1)[0][0]
+        else:
+            return last_val
     elif model_type == "Derivative":
         if d_seq in der_map: 
             pred_change = der_map[d_seq].most_common(1)[0][0]
             return last_val + pred_change
+        else:
+            return last_val
     elif model_type == "Combined":
         abs_cand = abs_map.get(a_seq, Counter())
         der_cand = der_map.get(d_seq, Counter())
         poss = set(abs_cand.keys())
         for c in der_cand.keys(): poss.add(last_val + c)
-        if not poss: return None
+        if not poss: return last_val
         best, max_s = None, -1
         for v in poss:
             s = abs_cand[v] + der_cand[v - last_val]
             if s > max_s: max_s, best = s, v
-        return best
-    return None
+        return best if best is not None else last_val
+    return last_val
 
 def generate_signal(prices, strategies):
     if not strategies: return 0
@@ -301,7 +318,8 @@ def generate_signal(prices, strategies):
         a_seq = tuple(buckets) 
         if seq_len > 1:
             d_seq = tuple(a_seq[k] - a_seq[k-1] for k in range(1, len(a_seq)))
-        else: d_seq = ()
+        else:
+            d_seq = ()
             
         last_val = a_seq[-1]
         
@@ -312,21 +330,21 @@ def generate_signal(prices, strategies):
             model['all_vals'], model['all_changes']
         )
         
-        if pred_val is None: continue
-
         pred_diff = pred_val - last_val
         if pred_diff != 0:
             direction = 1 if pred_diff > 0 else -1
             active_directions.append(direction)
             
     if not active_directions: return 0
+    
     up = active_directions.count(1)
     down = active_directions.count(-1)
+    
     if up > down: return 1
     elif down > up: return -1
     return 0
 
-# --- 5. VERIFICATION & HISTORY ---
+# --- 4. VERIFICATION & HISTORICAL ANALYSIS ---
 
 def run_strict_verification(models_cache):
     print("\n========================================")
@@ -334,13 +352,9 @@ def run_strict_verification(models_cache):
     print("========================================")
     passed_all = True
     
-    def verify_asset(asset):
-        full_raw_data = sync_ohlc_full(asset)
-        if not full_raw_data:
-            print(f"[FAIL] {asset} - No Data")
-            return False
-
-        asset_passed = True
+    for asset in ASSETS:
+        full_raw_data = sync_ohlc_with_github(asset)
+        
         for tf_name, model_data in models_cache[asset].items():
             strategies = model_data['strategies']
             exp_acc = model_data['expected_acc']
@@ -376,18 +390,16 @@ def run_strict_verification(models_cache):
                     last_val = a_seq[-1]
                     actual_val = buckets[target_idx]
                     
+                    diff = actual_val - last_val
+                    model_actual_dir = 1 if diff > 0 else (-1 if diff < 0 else 0)
+                    
                     pred_val = get_prediction(model['config']['model_type'], model['abs_map'], model['der_map'],
                                               a_seq, d_seq, last_val, model['all_vals'], model['all_changes'])
                     
-                    if pred_val is None: continue
-
                     pred_diff = pred_val - last_val
                     
                     if pred_diff != 0:
                         direction = 1 if pred_diff > 0 else -1
-                        actual_diff = actual_val - last_val
-                        model_actual_dir = 1 if actual_diff > 0 else (-1 if actual_diff < 0 else 0)
-                        
                         is_correct = (direction == model_actual_dir)
                         is_flat = (model_actual_dir == 0)
                         active_directions.append({"dir": direction, "is_correct": is_correct, "is_flat": is_flat})
@@ -410,49 +422,32 @@ def run_strict_verification(models_cache):
                 if any(x['is_correct'] for x in winning_voters): unique_correct += 1
             
             calc_acc = (unique_correct / unique_total * 100) if unique_total > 0 else 0
-            
-            # --- RELAXED TOLERANCE LOGIC ---
-            # We allow 1% deviation or 25 trades (whichever is greater) to prevent failures on tiny data changes
-            trade_tolerance = max(25, exp_trades * 0.01)
-            
             acc_match = abs(calc_acc - exp_acc) < 0.5
-            trade_match = abs(unique_total - exp_trades) <= trade_tolerance
+            trade_match = abs(unique_total - exp_trades) < 5
             
             status = "PASS" if (acc_match and trade_match) else "FAIL"
+            if status == "FAIL": passed_all = False
             print(f"[{status}] {asset} {tf_name} | Calc: {calc_acc:.2f}% ({unique_total}) | Json: {exp_acc:.2f}% ({exp_trades})")
-            if status == "FAIL": asset_passed = False
             
-        if asset_passed:
-            with CACHE_LOCK:
-                PRICE_CACHE[asset] = full_raw_data[-15000:] 
-        
-        return asset_passed
-
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        results = list(executor.map(verify_asset, ASSETS))
-        
-    if not all(results):
-        passed_all = False
-
     return passed_all
 
 def populate_weekly_history(models_cache):
+    print("\n--- Generating Signal Log & Calculating Strict Accuracy ---")
     global HISTORY_LOG, HISTORY_ACCURACY
     logs = []
-    cutoff_time = datetime.now(timezone.utc) - timedelta(days=7)
+    
+    cutoff_time = datetime.now() - timedelta(days=7)
     
     total_wins = 0
     total_valid_moves = 0
     
     for asset in ASSETS:
-        with CACHE_LOCK:
-            raw_data = list(PRICE_CACHE[asset]) 
-
+        raw_data = get_binance_recent(asset, days=20)
+        
         for tf_name, model_data in models_cache.get(asset, {}).items():
             strategies = model_data['strategies']
-            if not strategies: continue
-
             tf_pandas = TIMEFRAMES[tf_name]
+            
             min_bucket_size = min(s['bucket_size'] for s in strategies)
             
             df = get_resampled_df(raw_data, tf_pandas)
@@ -467,16 +462,14 @@ def populate_weekly_history(models_cache):
             if len(prices) <= start_idx: continue
             
             for i in range(start_idx, len(prices) - 1): 
-                target_ts = timestamps[i]
-                if target_ts.tzinfo is None:
-                    target_ts = target_ts.replace(tzinfo=timezone.utc)
-
-                if target_ts < cutoff_time: 
-                    continue
-
                 hist_prices = prices[:i]
                 current_price = prices[i-1]
+                target_ts = timestamps[i]
+                
                 outcome_price = prices[i]
+                
+                if target_ts < cutoff_time:
+                    continue
                 
                 sig = generate_signal(hist_prices, strategies)
                 
@@ -486,6 +479,7 @@ def populate_weekly_history(models_cache):
                     bucket_diff = end_bucket - start_bucket
                     
                     outcome_str = "NOISE"
+                    
                     if sig == 1:
                         if bucket_diff > 0: outcome_str = "WIN"
                         elif bucket_diff < 0: outcome_str = "LOSS"
@@ -494,10 +488,12 @@ def populate_weekly_history(models_cache):
                         elif bucket_diff > 0: outcome_str = "LOSS"
                     
                     if outcome_str == "WIN":
-                        total_wins += 1; total_valid_moves += 1
+                        total_wins += 1
+                        total_valid_moves += 1
                     elif outcome_str == "LOSS":
                         total_valid_moves += 1
                     
+                    # --- NEW: PERCENTAGE CHANGE CALCULATION ---
                     pct_change = ((outcome_price - current_price) / current_price) * 100
 
                     logs.append({
@@ -513,13 +509,19 @@ def populate_weekly_history(models_cache):
     
     logs.sort(key=lambda x: x['time'], reverse=True)
     HISTORY_LOG = logs
-    HISTORY_ACCURACY = (total_wins / total_valid_moves * 100) if total_valid_moves > 0 else 0.0
     
+    if total_valid_moves > 0:
+        HISTORY_ACCURACY = (total_wins / total_valid_moves) * 100
+    else:
+        HISTORY_ACCURACY = 0.0
+        
     print(f"Generated {len(HISTORY_LOG)} signals. Strict Accuracy: {HISTORY_ACCURACY:.2f}%")
 
+    # --- SAVE TO DB ---
     if SessionLocal:
         try:
             session = SessionLocal()
+            # We clear old history and replace with re-verified history
             session.query(HistoryEntry).delete()
             for log in logs:
                 entry = HistoryEntry(
@@ -530,56 +532,61 @@ def populate_weekly_history(models_cache):
                     price_at_signal=log['price_at_signal'],
                     outcome=log['outcome'],
                     close_price=log['close_price']
+                    # pct_change is deliberately excluded from DB to avoid schema migration issues
                 )
                 session.add(entry)
             session.commit()
             session.close()
-        except Exception: pass
+            print("[DB] Signal History saved to Database.")
+        except Exception as e:
+            print(f"[DB Error] Could not save history: {e}")
 
-# --- 6. LIVE SERVER ---
+# --- 5. LIVE SERVER ---
 
 def update_live_signals(models_cache):
     global SIGNAL_MATRIX, LAST_UPDATE
-    start_time = time.time()
-    
-    with ThreadPoolExecutor(max_workers=20) as executor:
-        futures = {executor.submit(update_asset_cache_live, asset): asset for asset in ASSETS}
-        for future in as_completed(futures): pass
-            
+    print(f"\n[Scheduler] Updating signals at {datetime.now().strftime('%H:%M:%S')}...")
     temp_matrix = {}
+    
     for asset in ASSETS:
         temp_matrix[asset] = {}
-        with CACHE_LOCK:
-            raw_data = list(PRICE_CACHE[asset])
-            
+        raw_data = get_binance_recent(asset, days=20)
+        
         for tf_name, model_data in models_cache.get(asset, {}).items():
             strategies = model_data['strategies']
             tf_pandas = TIMEFRAMES[tf_name]
             prices = resample_prices(raw_data, tf_pandas)
             
-            if prices: prices = prices[:-1]
+            if prices:
+                prices = prices[:-1]
             
             sig = generate_signal(prices, strategies)
             temp_matrix[asset][tf_name] = sig
             
     SIGNAL_MATRIX = temp_matrix
-    LAST_UPDATE = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    LAST_UPDATE = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
+    # --- SAVE MATRIX TO DB ---
     if SessionLocal:
         try:
             session = SessionLocal()
             session.query(MatrixEntry).delete()
             for asset, tfs in temp_matrix.items():
                 for tf, val in tfs.items():
-                    session.add(MatrixEntry(asset=asset, tf=tf, signal_val=val))
+                    entry = MatrixEntry(
+                        asset=asset,
+                        tf=tf,
+                        signal_val=val
+                    )
+                    session.add(entry)
             session.commit()
             session.close()
-        except Exception: pass
+            print("[DB] Live Signal Matrix saved to Database.")
+        except Exception as e:
+            print(f"[DB Error] Could not save matrix: {e}")
     
     populate_weekly_history(models_cache)
-    
-    duration = time.time() - start_time
-    print(f"[Scheduler] Update Complete in {duration:.2f}s.")
+    print("[Scheduler] Signals Updated.")
 
 app = Flask(__name__)
 
@@ -590,7 +597,7 @@ def home():
     <html>
     <head>
         <title>Strategy Matrix</title>
-        <meta http-equiv="refresh" content="5">
+        <meta http-equiv="refresh" content="60">
         <style>
             body {{ font-family: monospace; background: #111; color: #eee; padding: 20px; }}
             table {{ border-collapse: collapse; width: 100%; margin-bottom: 30px; }}
@@ -607,7 +614,7 @@ def home():
     </head>
     <body>
         <h1>Live Signal Matrix</h1>
-        <p>Last Update: {LAST_UPDATE} (UTC)</p>
+        <p>Last Update: {LAST_UPDATE}</p>
         
         <table>
             <thead>
@@ -644,7 +651,7 @@ def home():
         <table>
             <thead>
                 <tr>
-                    <th>Time (UTC)</th>
+                    <th>Time</th>
                     <th>Asset</th>
                     <th>Timeframe</th>
                     <th>Signal</th>
@@ -658,7 +665,7 @@ def home():
     
     for log in HISTORY_LOG[:150]:
         cls = "buy" if log['signal'] == "BUY" else "sell"
-        res_cls = log['outcome']
+        res_cls = log['outcome'] # WIN, LOSS, NOISE
         pct_txt = f"{log['pct_change']:+.2f}%"
         
         html += f"""
@@ -683,7 +690,6 @@ def run_scheduler(models_cache):
     schedule.every().hour.at(":15").do(update_live_signals, models_cache)
     schedule.every().hour.at(":30").do(update_live_signals, models_cache)
     schedule.every().hour.at(":45").do(update_live_signals, models_cache)
-    
     while True:
         schedule.run_pending()
         time.sleep(1)
@@ -691,7 +697,8 @@ def run_scheduler(models_cache):
 if __name__ == "__main__":
     models = fetch_models_from_github()
     if run_strict_verification(models):
-        print("\n>>> VERIFICATION SUCCESSFUL. STARTING LIVE SERVER (FAST MODE). <<<")
+        print("\n>>> VERIFICATION SUCCESSFUL. STARTING LIVE SERVER. <<<")
+        populate_weekly_history(models)
         t = threading.Thread(target=run_scheduler, args=(models,))
         t.daemon = True
         t.start()
