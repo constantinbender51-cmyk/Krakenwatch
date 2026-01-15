@@ -170,7 +170,7 @@ def update_asset_cache_live(asset):
     """
     global PRICE_CACHE
     
-    # We fetch last 5 candles to cover any slight delays or open candles
+    # Fetch last 5 candles
     recent_candles = fetch_binance_candles(asset, limit=5)
     
     if not recent_candles:
@@ -178,16 +178,13 @@ def update_asset_cache_live(asset):
 
     with CACHE_LOCK:
         current_data = PRICE_CACHE.get(asset, [])
-        # Create dict for deduplication
         data_dict = dict(current_data)
         for ts, price in recent_candles:
             data_dict[ts] = price
         
-        # Sort
         sorted_items = sorted(data_dict.items())
         
-        # Keep cache small for live performance (last ~2500 candles = ~25 days)
-        # We ONLY truncate here, in the live loop, NOT during verification.
+        # Keep ~25 days (2500 candles @ 15m)
         if len(sorted_items) > 2500:
             sorted_items = sorted_items[-2500:]
             
@@ -197,8 +194,7 @@ def update_asset_cache_live(asset):
 
 def sync_ohlc_full(symbol):
     """
-    Fetches FULL history (2020-Present) for strict verification.
-    First tries GitHub cache, then fills gaps from Binance.
+    Fetches FULL history for strict verification.
     """
     print(f"[{symbol}] Loading full history...")
     filename = f"ohlc/{symbol}.csv"
@@ -237,13 +233,12 @@ def sync_ohlc_full(symbol):
     new_data = []
     curr = start_ts
     
-    # Safety brake for loop
     while curr < end_ts:
         batch = fetch_binance_candles(symbol, start_time=curr)
         if not batch: break
         new_data.extend(batch)
         curr = batch[-1][0] + 1
-        time.sleep(0.05) # Rate limit protection during heavy load
+        time.sleep(0.05) 
         if len(batch) < 500: break
 
     full_data = existing_data + new_data
@@ -361,15 +356,12 @@ def run_strict_verification(models_cache):
     print("========================================")
     passed_all = True
     
-    # Helper to process one asset
     def verify_asset(asset):
-        # 1. Fetch FULL history
         full_raw_data = sync_ohlc_full(asset)
         if not full_raw_data:
             print(f"[FAIL] {asset} - No Data")
             return False
 
-        # 2. Run Verification
         asset_passed = True
         for tf_name, model_data in models_cache[asset].items():
             strategies = model_data['strategies']
@@ -382,7 +374,6 @@ def run_strict_verification(models_cache):
             max_seq_len = max(s['seq_len'] for s in strategies)
             total_test_len = len(prices) - max_seq_len
             
-            # Pre-calculate buckets for speed
             for s in strategies:
                 s['cached_buckets'] = [get_bucket(p, s['bucket_size']) for p in prices]
             
@@ -407,9 +398,6 @@ def run_strict_verification(models_cache):
                     last_val = a_seq[-1]
                     actual_val = buckets[target_idx]
                     
-                    diff = actual_val - last_val
-                    model_actual_dir = 1 if diff > 0 else (-1 if diff < 0 else 0)
-                    
                     pred_val = get_prediction(model['config']['model_type'], model['abs_map'], model['der_map'],
                                               a_seq, d_seq, last_val, model['all_vals'], model['all_changes'])
                     
@@ -419,6 +407,9 @@ def run_strict_verification(models_cache):
                     
                     if pred_diff != 0:
                         direction = 1 if pred_diff > 0 else -1
+                        actual_diff = actual_val - last_val
+                        model_actual_dir = 1 if actual_diff > 0 else (-1 if actual_diff < 0 else 0)
+                        
                         is_correct = (direction == model_actual_dir)
                         is_flat = (model_actual_dir == 0)
                         active_directions.append({"dir": direction, "is_correct": is_correct, "is_flat": is_flat})
@@ -448,14 +439,13 @@ def run_strict_verification(models_cache):
             print(f"[{status}] {asset} {tf_name} | Calc: {calc_acc:.2f}% ({unique_total}) | Json: {exp_acc:.2f}% ({exp_trades})")
             if status == "FAIL": asset_passed = False
             
-        # 3. If Passed, Seed Cache (Truncated)
         if asset_passed:
             with CACHE_LOCK:
-                PRICE_CACHE[asset] = full_raw_data[-2500:] # Keep only recent for live mode
+                # Keep 2500 candles (approx 26 days)
+                PRICE_CACHE[asset] = full_raw_data[-2500:] 
         
         return asset_passed
 
-    # Run in parallel for faster startup
     with ThreadPoolExecutor(max_workers=5) as executor:
         results = list(executor.map(verify_asset, ASSETS))
         
@@ -467,7 +457,10 @@ def run_strict_verification(models_cache):
 def populate_weekly_history(models_cache):
     global HISTORY_LOG, HISTORY_ACCURACY
     logs = []
-    cutoff_time = datetime.now() - timedelta(days=7)
+    
+    # FIX: Use UTC now
+    cutoff_time = datetime.utcnow() - timedelta(days=7)
+    
     total_wins = 0
     total_valid_moves = 0
     
@@ -475,6 +468,12 @@ def populate_weekly_history(models_cache):
         with CACHE_LOCK:
             raw_data = list(PRICE_CACHE[asset]) 
         
+        # DEBUG LOGGING (First time check)
+        if len(raw_data) > 0 and asset == "BTCUSDT":
+             first_ts = datetime.utcfromtimestamp(raw_data[0][0]/1000)
+             last_ts = datetime.utcfromtimestamp(raw_data[-1][0]/1000)
+             print(f"[DEBUG] BTCUSDT Cache Size: {len(raw_data)} | Range: {first_ts} -> {last_ts}")
+
         for tf_name, model_data in models_cache.get(asset, {}).items():
             strategies = model_data['strategies']
             tf_pandas = TIMEFRAMES[tf_name]
@@ -492,6 +491,8 @@ def populate_weekly_history(models_cache):
             
             for i in range(start_idx, len(prices) - 1): 
                 target_ts = timestamps[i]
+                
+                # STRICT FILTER
                 if target_ts < cutoff_time: continue
 
                 hist_prices = prices[:i]
@@ -534,6 +535,8 @@ def populate_weekly_history(models_cache):
     logs.sort(key=lambda x: x['time'], reverse=True)
     HISTORY_LOG = logs
     HISTORY_ACCURACY = (total_wins / total_valid_moves * 100) if total_valid_moves > 0 else 0.0
+    
+    print(f"Generated {len(HISTORY_LOG)} signals. Strict Accuracy: {HISTORY_ACCURACY:.2f}%")
 
     if SessionLocal:
         try:
@@ -560,12 +563,10 @@ def update_live_signals(models_cache):
     global SIGNAL_MATRIX, LAST_UPDATE
     start_time = time.time()
     
-    # Parallel Fetch (Delta)
     with ThreadPoolExecutor(max_workers=20) as executor:
         futures = {executor.submit(update_asset_cache_live, asset): asset for asset in ASSETS}
         for future in as_completed(futures): pass
             
-    # Calculate Signals
     temp_matrix = {}
     for asset in ASSETS:
         temp_matrix[asset] = {}
@@ -583,9 +584,8 @@ def update_live_signals(models_cache):
             temp_matrix[asset][tf_name] = sig
             
     SIGNAL_MATRIX = temp_matrix
-    LAST_UPDATE = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    LAST_UPDATE = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     
-    # DB Save
     if SessionLocal:
         try:
             session = SessionLocal()
@@ -628,7 +628,7 @@ def home():
     </head>
     <body>
         <h1>Live Signal Matrix</h1>
-        <p>Last Update: {LAST_UPDATE}</p>
+        <p>Last Update: {LAST_UPDATE} (UTC)</p>
         
         <table>
             <thead>
@@ -665,7 +665,7 @@ def home():
         <table>
             <thead>
                 <tr>
-                    <th>Time</th>
+                    <th>Time (UTC)</th>
                     <th>Asset</th>
                     <th>Timeframe</th>
                     <th>Signal</th>
