@@ -1,20 +1,16 @@
 import os
 import json
-import asyncio
-import aiohttp
+import random
 import requests
-import time
+import pandas as pd
 from datetime import datetime, timedelta
+from dotenv import load_dotenv
 
 # =========================================
 # 1. CONFIGURATION
 # =========================================
 
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass
+load_dotenv()
 
 GITHUB_PAT = os.getenv("PAT")
 REPO_OWNER = "constantinbender51-cmyk"
@@ -22,158 +18,72 @@ REPO_NAME = "model-2"
 GITHUB_API_URL = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/"
 BINANCE_API_URL = "https://api.binance.com/api/v3/klines"
 
-BACKTEST_DAYS = 7  # Download & Replay last 7 days on startup
+DATA_DIR = "./data"
+# Specific backtest window
+BACKTEST_START = datetime(2026, 1, 1)
+BACKTEST_END = datetime(2026, 1, 15)
 
 # =========================================
-# 2. STATS & TRADE TRACKING (PERCENTAGE PnL)
-# =========================================
-
-class TradeTracker:
-    def __init__(self):
-        self.active_trades = []
-        self.closed_trades = []
-        self.score = 0.0          # Cumulative % PnL (e.g., 15.5 means +15.5%)
-        self.pnl_cumulative = 0.0 # Same as score
-        self.hits_in_direction = 0
-        self.total_significant_moves = 0
-
-    def add_trade(self, asset, direction, entry_price, bucket_size, duration_minutes, interval, start_time):
-        expiry = start_time + timedelta(minutes=duration_minutes)
-        trade = {
-            "asset": asset,
-            "direction": direction,
-            "entry_price": entry_price,
-            "bucket_size": bucket_size,
-            "target_price": entry_price + (bucket_size * direction),
-            "stop_price": entry_price - (bucket_size * direction),
-            "expiry": expiry,
-            "interval": interval,
-            "start_time": start_time
-        }
-        self.active_trades.append(trade)
-
-    def update(self, asset, current_close, current_high, current_low, current_time):
-        asset_trades = [t for t in self.active_trades if t['asset'] == asset]
-        
-        for trade in asset_trades:
-            is_closed = False
-            result = "OPEN"
-            exit_price = current_close
-            
-            hit_win = False
-            hit_loss = False
-            
-            # 1. Check Levels
-            if trade['direction'] == 1: # LONG
-                if current_high >= trade['target_price']: hit_win = True
-                if current_low <= trade['stop_price']: hit_loss = True
-            elif trade['direction'] == -1: # SHORT
-                if current_low <= trade['target_price']: hit_win = True
-                if current_high >= trade['stop_price']: hit_loss = True
-
-            # 2. Worst-Case Resolution
-            if hit_win and hit_loss:
-                is_closed = True; result = "LOSS_HIT"; exit_price = trade['stop_price']
-            elif hit_loss:
-                is_closed = True; result = "LOSS_HIT"; exit_price = trade['stop_price']
-            elif hit_win:
-                is_closed = True; result = "WIN_HIT"; exit_price = trade['target_price']
-
-            # 3. Check Expiry
-            if not is_closed and current_time >= trade['expiry']:
-                is_closed = True
-                result = "EXPIRED"
-                exit_price = current_close
-
-            if is_closed:
-                self._finalize_trade(trade, exit_price, result)
-
-    def _finalize_trade(self, trade, exit_price, result):
-        # --- PnL CALCULATION (PERCENTAGE) ---
-        raw_diff = (exit_price - trade['entry_price']) * trade['direction']
-        pnl_percent = (raw_diff / trade['entry_price']) * 100.0
-        
-        self.pnl_cumulative += pnl_percent
-        self.score += pnl_percent
-        
-        moved_bucket = False
-        won_bucket = False
-        
-        if result == "WIN_HIT":
-            moved_bucket = True; won_bucket = True
-        elif result == "LOSS_HIT":
-            moved_bucket = True; won_bucket = False
-        elif result == "EXPIRED":
-            # Significant move check
-            if abs(exit_price - trade['entry_price']) >= trade['bucket_size']:
-                moved_bucket = True
-                if pnl_percent > 0: won_bucket = True
-
-        if moved_bucket:
-            self.total_significant_moves += 1
-            if won_bucket: self.hits_in_direction += 1
-
-        self.active_trades.remove(trade)
-        self.closed_trades.append({"pnl": pnl_percent, "result": result})
-
-    def get_stats(self):
-        acc = 0.0
-        if self.total_significant_moves > 0:
-            acc = (self.hits_in_direction / self.total_significant_moves) * 100
-        return {
-            "accuracy": acc,
-            "pnl": self.pnl_cumulative, # Total % Return (Sum of all trade %s)
-            "active": len(self.active_trades),
-            "denominator": self.total_significant_moves,
-            "closed_count": len(self.closed_trades)
-        }
-
-# =========================================
-# 3. DATA & MODEL UTILS (Unchanged)
+# 2. MODEL LOADER (Random Selection)
 # =========================================
 
 class ModelLoader:
     def __init__(self, pat=None):
         self.headers = {"Authorization": f"Bearer {pat}", "Accept": "application/vnd.github.v3+json"} if pat else {}
 
-    def fetch_all_models(self):
-        print(f"[*] Scanning repository: {REPO_OWNER}/{REPO_NAME}...")
+    def fetch_random_model(self):
+        print(f"[*] Connecting to repository: {REPO_OWNER}/{REPO_NAME}...")
         try:
             r = requests.get(GITHUB_API_URL, headers=self.headers)
-            if r.status_code != 200: return []
+            if r.status_code != 200: 
+                print(f"❌ Failed to fetch repo content: {r.status_code}")
+                return None
+            
             files_list = r.json()
-            if not isinstance(files_list, list): return []
-            
             model_files = [f for f in files_list if f['name'].endswith('.json')]
-            print(f"[*] Found {len(model_files)} files. Downloading...")
             
-            loaded = []
-            for f in model_files:
-                if f.get('download_url'): 
-                    self._download_raw(f['download_url'], f['name'], loaded)
-            return loaded
+            if not model_files:
+                print("❌ No JSON model files found.")
+                return None
+                
+            # Random selection
+            target_file = random.choice(model_files)
+            print(f"[*] Randomly selected file: {target_file['name']}")
+            
+            if target_file.get('download_url'): 
+                return self._download_raw(target_file['download_url'])
         except Exception as e: 
-            print(f"Error: {e}")
-            return []
+            print(f"❌ Error fetching models: {e}")
+            return None
 
-    def _download_raw(self, url, filename, container):
+    def _download_raw(self, url):
         try:
-            r = requests.get(url, headers=self.headers, stream=True)
+            r = requests.get(url, headers=self.headers)
             if r.status_code == 200:
                 data = r.json()
                 if 'asset' in data: 
-                    container.append(data)
-                    print(f"    -> Loaded: {data['asset']:<10} | {len(r.content)/1e6:.2f} MB")
-        except: pass
+                    print(f"    -> Model Loaded for Asset: {data['asset']}")
+                    return data
+        except Exception as e:
+            print(f"❌ Error downloading raw file: {e}")
+        return None
+
+# =========================================
+# 3. INFERENCE ENGINE (Synchronous)
+# =========================================
 
 class InferenceEngine:
     def __init__(self, model_data):
         self.strategies = model_data['strategies']
         self.asset = model_data['asset']
         self.interval = model_data['interval']
+        
+        # Parse duration (e.g., '15m' -> 15)
         self.duration_min = 1
-        if 'm' in self.interval: self.duration_min = int(self.interval.replace('m', ''))
-        elif 'h' in self.interval: self.duration_min = int(self.interval.replace('h', '')) * 60
+        if 'm' in self.interval: 
+            self.duration_min = int(self.interval.replace('m', ''))
+        elif 'h' in self.interval: 
+            self.duration_min = int(self.interval.replace('h', '')) * 60
 
     def _get_bucket(self, price, bucket_size):
         return int(price // bucket_size) if bucket_size > 0 else 0
@@ -183,6 +93,8 @@ class InferenceEngine:
 
     def predict(self, recent_prices):
         active_signals = []
+        
+        # We need at least enough history for the strategies
         current_price = recent_prices[-1]
 
         for strat in self.strategies:
@@ -210,6 +122,7 @@ class InferenceEngine:
                 p1 = self._lookup(params['abs_map'], a_seq)
                 chg = self._lookup(params['der_map'], d_seq)
                 p2 = last_bucket + chg if chg else None
+                
                 d1 = 0 if p1 is None else (1 if p1 > last_bucket else -1 if p1 < last_bucket else 0)
                 d2 = 0 if p2 is None else (1 if p2 > last_bucket else -1 if p2 < last_bucket else 0)
                 
@@ -227,158 +140,186 @@ class InferenceEngine:
                         "bucket_size": b_size
                     })
 
-        if not active_signals: return 0, current_price, 0
+        if not active_signals: return 0, 0
+        
+        # Filter for consistency
         directions = {x['dir'] for x in active_signals}
-        if len(directions) > 1: return 0, current_price, 0
+        if len(directions) > 1: return 0, 0
             
         active_signals.sort(key=lambda x: x['b_count'])
-        return active_signals[0]['dir'], active_signals[0]['est_price'], active_signals[0]['bucket_size']
+        return active_signals[0]['dir'], active_signals[0]['bucket_size']
 
 # =========================================
-# 4. HISTORICAL DATA & BACKTESTING
+# 4. DATA MANAGER
 # =========================================
 
-async def fetch_historical_candles(session, asset, interval, days):
-    end_time = int(time.time() * 1000)
-    start_time = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
-    all_candles = []
-    current_start = start_time
-    
-    while current_start < end_time:
-        url = f"{BINANCE_API_URL}?symbol={asset}&interval={interval}&limit=1000&startTime={current_start}"
-        try:
-            async with session.get(url) as resp:
-                if resp.status != 200: break
-                data = await resp.json()
-                if not data: break
-                
-                batch = [{"ts": int(x[0]), "h": float(x[2]), "l": float(x[3]), "c": float(x[4])} for x in data]
-                all_candles.extend(batch)
-                current_start = data[-1][0] + 1
-                if len(batch) < 1000: break
-        except: break
-    return asset, all_candles
-
-async def run_startup_backtest(engines, tracker):
-    print(f"\n--- 🔙 STARTING {BACKTEST_DAYS}-DAY BACKTEST ---")
-    print(f"Fetching historical data for {len(engines)} assets...")
-    
-    async with aiohttp.ClientSession() as session:
-        tasks = [fetch_historical_candles(session, e.asset, e.interval, BACKTEST_DAYS) for e in engines]
-        results = await asyncio.gather(*tasks)
-    
-    print("Simulating trades...")
-    total_candles = 0
-    
-    for engine in engines:
-        history = next((r[1] for r in results if r[0] == engine.asset), [])
-        if len(history) < 100: continue
+def get_data(symbol, start_date, end_date):
+    if not os.path.exists(DATA_DIR):
+        os.makedirs(DATA_DIR)
         
-        max_seq = 20
-        for i in range(max_seq, len(history)):
-            current_candle = history[i]
-            current_time = datetime.fromtimestamp(current_candle['ts'] / 1000)
+    file_path = f"{DATA_DIR}/{symbol}_1m.csv"
+    
+    # 1. Try to load local
+    if os.path.exists(file_path):
+        print(f"[*] Found local data: {file_path}")
+        df = pd.read_csv(file_path)
+        df['datetime'] = pd.to_datetime(df['datetime'])
+        df.set_index('datetime', inplace=True)
+        return df
+    
+    # 2. Download if missing (Download 2 weeks around the target date)
+    print(f"[*] Local data missing. Downloading {symbol} from Binance...")
+    
+    # Buffer: 5 days before start, 2 days after end to be safe
+    dl_start = int((start_date - timedelta(days=5)).timestamp() * 1000)
+    dl_end = int((end_date + timedelta(days=2)).timestamp() * 1000)
+    
+    all_candles = []
+    current_start = dl_start
+    
+    while current_start < dl_end:
+        url = f"{BINANCE_API_URL}?symbol={symbol}&interval=1m&limit=1000&startTime={current_start}"
+        try:
+            r = requests.get(url)
+            if r.status_code != 200: break
+            data = r.json()
+            if not data: break
             
-            tracker.update(engine.asset, current_candle['c'], current_candle['h'], current_candle['l'], current_time)
+            for x in data:
+                all_candles.append({
+                    "datetime": datetime.fromtimestamp(x[0]/1000),
+                    "open": float(x[1]),
+                    "high": float(x[2]),
+                    "low": float(x[3]),
+                    "close": float(x[4])
+                })
+            current_start = data[-1][0] + 60000 # +1 min
+        except Exception as e:
+            print(e)
+            break
             
-            window_closes = [c['c'] for c in history[i-max_seq+1 : i+1]]
-            direction, target, b_size = engine.predict(window_closes)
+    if not all_candles:
+        print("❌ Failed to download data.")
+        return pd.DataFrame()
+        
+    df = pd.DataFrame(all_candles)
+    print(f"    -> Saving {len(df)} candles to {file_path}")
+    df.to_csv(file_path, index=False)
+    
+    df['datetime'] = pd.to_datetime(df['datetime'])
+    df.set_index('datetime', inplace=True)
+    return df
+
+# =========================================
+# 5. MAIN BACKTEST LOOP
+# =========================================
+
+def run():
+    # A. Fetch Model
+    loader = ModelLoader(pat=GITHUB_PAT)
+    model_data = loader.fetch_random_model()
+    if not model_data: return
+    
+    engine = InferenceEngine(model_data)
+    asset = engine.asset
+    
+    # B. Get Data
+    df_all = get_data(asset, BACKTEST_START, BACKTEST_END)
+    if df_all.empty: return
+
+    # Filter strictly for Jan 1 - Jan 15 (plus warmup buffer)
+    # We need data BEFORE Jan 1 for the model to calculate the first signals
+    mask = (df_all.index >= (BACKTEST_START - timedelta(hours=5))) & (df_all.index <= BACKTEST_END)
+    df = df_all.loc[mask].sort_index()
+    
+    print(f"\n--- 🧪 RUNNING BACKTEST: {asset} ---")
+    print(f"Period: {BACKTEST_START} -> {BACKTEST_END}")
+    print(f"Candles: {len(df)}")
+    
+    # C. Simulation State
+    active_trade = None
+    trades = []
+    
+    history = []
+    
+    for ts, row in df.iterrows():
+        close = row['close']
+        high = row['high']
+        low = row['low']
+        history.append(close)
+        
+        # 1. Manage Active Trade
+        if active_trade:
+            res = "OPEN"
+            exit_price = close
+            
+            # Check stops
+            is_win = False
+            is_loss = False
+            
+            if active_trade['dir'] == 1: # LONG
+                if high >= active_trade['tp']: is_win = True
+                if low <= active_trade['sl']: is_loss = True
+            else: # SHORT
+                if low <= active_trade['tp']: is_win = True
+                if high >= active_trade['sl']: is_loss = True
+            
+            if is_loss: 
+                res = "LOSS"
+                exit_price = active_trade['sl']
+            elif is_win: 
+                res = "WIN"
+                exit_price = active_trade['tp']
+            elif ts >= active_trade['expiry']:
+                res = "EXPIRED"
+                exit_price = close
+                
+            if res != "OPEN":
+                # Calc PnL
+                raw_pnl = (exit_price - active_trade['entry']) * active_trade['dir']
+                pnl_pct = (raw_pnl / active_trade['entry']) * 100
+                
+                trades.append({
+                    "time": ts,
+                    "type": res,
+                    "pnl": pnl_pct
+                })
+                active_trade = None
+
+        # 2. Check for New Signal (Only if no active trade and inside window)
+        if not active_trade and ts >= BACKTEST_START:
+            direction, b_size = engine.predict(history)
             
             if direction != 0:
-                tracker.add_trade(engine.asset, direction, current_candle['c'], b_size, engine.duration_min, engine.interval, current_time)
+                tp = close + (b_size * direction)
+                sl = close - (b_size * direction)
+                expiry = ts + timedelta(minutes=engine.duration_min)
                 
-        total_candles += len(history)
+                active_trade = {
+                    "entry": close,
+                    "dir": direction,
+                    "tp": tp,
+                    "sl": sl,
+                    "expiry": expiry
+                }
 
-    stats = tracker.get_stats()
-    print(f"✅ Backtest Complete ({total_candles} candles)")
-    print(f"📊 INITIAL STATS: Acc: {stats['accuracy']:.2f}% | Return: {stats['pnl']:.2f}% | Trades: {stats['closed_count']}")
-    print("-" * 60)
-
-# =========================================
-# 5. LIVE LOOP
-# =========================================
-
-async def fetch_live_data(session, engine):
-    url = f"{BINANCE_API_URL}?symbol={engine.asset}&interval={engine.interval}&limit=50"
-    try:
-        async with session.get(url) as response:
-            if response.status == 200:
-                data = await response.json()
-                closes = [float(x[4]) for x in data]
-                high = float(data[-1][2]) 
-                low = float(data[-1][3]) 
-                return engine, closes, high, low
-    except: pass
-    return engine, [], 0, 0
-
-async def run_bot_loop(engines, tracker):
-    print(f"\n🚀 SWITCHING TO LIVE MODE (PnL in %)\n")
-    async with aiohttp.ClientSession() as session:
-        while True:
-            now = datetime.now()
-            sleep_sec = 60 - now.second - (now.microsecond/1e6) + 0.1
-            if sleep_sec < 0: sleep_sec += 60
-            
-            print(f"⏳ Waiting {sleep_sec:.1f}s...")
-            await asyncio.sleep(sleep_sec)
-
-            start_ts = datetime.now()
-            print(f"\n--- ⚡ LIVE TICK: {start_ts.strftime('%H:%M:%S')} ---")
-
-            tasks = [fetch_live_data(session, eng) for eng in engines]
-            results = await asyncio.gather(*tasks)
-            signals = []
-            
-            for engine, closes, high, low in results:
-                if not closes: continue
-                current_price = closes[-1]
-                
-                tracker.update(engine.asset, current_price, high, low, start_ts)
-                
-                direction, target, b_size = engine.predict(closes)
-                if direction != 0:
-                    tracker.add_trade(engine.asset, direction, current_price, b_size, engine.duration_min, engine.interval, start_ts)
-                    signals.append({
-                        "asset": engine.asset,
-                        "dir": direction,
-                        "price": current_price,
-                        "target": target,
-                        "valid": f"{engine.duration_min}m"
-                    })
-
-            stats = tracker.get_stats()
-            print(f"📊 ACCURACY: {stats['accuracy']:.1f}% | TOTAL RETURN: {stats['pnl']:.2f}%")
-            
-            if signals:
-                print(f"{'ASSET':<10} {'DIR':<6} {'PRICE':<10} {'TARGET':<10} {'VALID'}")
-                print("-" * 50)
-                for s in signals:
-                    d_str = "BUY 🟢" if s['dir']==1 else "SELL 🔴"
-                    print(f"{s['asset']:<10} {d_str:<6} {s['price']:<10.4f} {s['target']:<10.4f} {s['valid']}")
-            else:
-                print("(No new signals)")
-            
-            lat = (datetime.now()-start_ts).total_seconds()*1000
-            print(f"Latency: {lat:.0f}ms")
-
-# =========================================
-# 6. MAIN
-# =========================================
-
-def main():
-    loader = ModelLoader(pat=GITHUB_PAT)
-    raw = loader.fetch_all_models()
-    if not raw: return
-    engines = [InferenceEngine(m) for m in raw]
-    tracker = TradeTracker()
+    # D. Stats
+    wins = len([t for t in trades if t['pnl'] > 0])
+    losses = len([t for t in trades if t['pnl'] <= 0])
+    total = len(trades)
+    accuracy = (wins/total*100) if total > 0 else 0
+    cum_pnl = sum([t['pnl'] for t in trades])
     
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        loop.run_until_complete(run_startup_backtest(engines, tracker))
-        loop.run_until_complete(run_bot_loop(engines, tracker))
-    except KeyboardInterrupt:
-        print("\nStopped.")
+    print("\n" + "="*30)
+    print("📊 FINAL RESULTS")
+    print("="*30)
+    print(f"Asset:      {asset}")
+    print(f"Trades:     {total}")
+    print(f"Wins:       {wins}")
+    print(f"Losses:     {losses}")
+    print(f"Accuracy:   {accuracy:.2f}%")
+    print(f"Total PnL:  {cum_pnl:.2f}%")
+    print("="*30)
 
 if __name__ == "__main__":
-    main()
+    run()
