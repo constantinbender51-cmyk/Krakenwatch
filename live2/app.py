@@ -1,9 +1,10 @@
 import os
 import json
+import asyncio
+import aiohttp
 import requests
-import urllib.request
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # =========================================
 # 1. CONFIGURATION
@@ -18,13 +19,13 @@ except ImportError:
 GITHUB_PAT = os.getenv("PAT")
 REPO_OWNER = "constantinbender51-cmyk"
 REPO_NAME = "model-2"
-# We still use the API to LIST the files
 GITHUB_API_URL = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/"
 
+# Binance Public API (No auth needed for market data)
 BINANCE_API_URL = "https://api.binance.com/api/v3/klines"
 
 # =========================================
-# 2. LARGE FILE MODEL LOADER
+# 2. MODEL LOADER (Run Once)
 # =========================================
 
 class ModelLoader:
@@ -35,38 +36,30 @@ class ModelLoader:
         } if pat else {}
 
     def fetch_all_models(self):
-        """Scans the repo and downloads ALL .json strategy files via raw download_url."""
+        """Scans the repo and downloads ALL .json strategy files."""
         print(f"[*] Scanning repository: {REPO_OWNER}/{REPO_NAME}...")
         
         try:
             r = requests.get(GITHUB_API_URL, headers=self.headers)
             if r.status_code != 200:
                 print(f"[!] Error listing files: Status {r.status_code}")
-                print(f"    Response: {r.text}")
                 return []
-                
+            
             files = r.json()
-            if not isinstance(files, list):
-                print(f"[!] Unexpected API response format: {type(files)}")
-                return []
-
             model_files = [f for f in files if f['name'].endswith('.json')]
             
             if not model_files:
-                print("[!] No JSON model files found in repository.")
+                print("[!] No JSON model files found.")
                 return []
 
-            print(f"[*] Found {len(model_files)} model files. Downloading large files...")
+            print(f"[*] Found {len(model_files)} files. Downloading into RAM...")
             
             loaded_models = []
             for file_info in model_files:
-                # USE 'download_url' for files > 1MB
                 raw_url = file_info.get('download_url')
                 if raw_url:
                     self._download_raw(raw_url, file_info['name'], loaded_models)
-                else:
-                    print(f"    [!] Skipped {file_info['name']} (No download URL)")
-                
+            
             return loaded_models
 
         except Exception as e:
@@ -75,42 +68,18 @@ class ModelLoader:
 
     def _download_raw(self, url, filename, container):
         try:
-            # We pass headers to handle Private Repos authentication on raw URLs
             r = requests.get(url, headers=self.headers, stream=True)
-            
             if r.status_code == 200:
-                # For large files, we load directly from the raw text stream
-                # No Base64 decoding needed here because it's the raw file
                 data = r.json()
-                
-                if 'asset' in data and 'strategies' in data:
+                if 'asset' in data:
                     size_mb = len(r.content) / (1024 * 1024)
                     container.append(data)
-                    print(f"    -> Loaded: {filename:<20} | {size_mb:.2f} MB | {data['asset']} [{data['interval']}]")
-                else:
-                    print(f"    -> Skipped {filename} (Invalid Structure)")
-            else:
-                print(f"    -> Failed {filename}: HTTP {r.status_code}")
-                
+                    print(f"    -> Loaded: {data['asset']:<10} | {size_mb:.2f} MB")
         except Exception as e:
             print(f"    -> Error downloading {filename}: {e}")
 
 # =========================================
-# 3. LIVE DATA UTILS
-# =========================================
-
-def get_latest_prices(symbol, interval, limit=100):
-    url = f"{BINANCE_API_URL}?symbol={symbol}&interval={interval}&limit={limit}"
-    try:
-        with urllib.request.urlopen(url) as response:
-            data = json.loads(response.read().decode())
-            return [float(x[4]) for x in data]
-    except Exception as e:
-        # Reduce noise if just a network blip
-        return []
-
-# =========================================
-# 4. INFERENCE ENGINE
+# 3. INFERENCE LOGIC (CPU Bound)
 # =========================================
 
 class InferenceEngine:
@@ -130,6 +99,9 @@ class InferenceEngine:
         active_signals = []
         current_price = recent_prices[-1]
 
+        # Ensure we have enough data for the longest strategy
+        # (Assuming max sequence length is reasonable, e.g. < 20)
+        
         for strat in self.strategies:
             cfg = strat['config']
             params = strat['params']
@@ -144,106 +116,145 @@ class InferenceEngine:
             window = recent_prices[-s_len:]
             buckets = [self._get_bucket(p, b_size) for p in window]
             
+            # Key Generation
             a_seq_key = "|".join(map(str, buckets))
-            
             d_seq_key = ""
             if s_len > 1:
                 derivs = [buckets[k] - buckets[k-1] for k in range(1, len(buckets))]
                 d_seq_key = "|".join(map(str, derivs))
-
+            
             last_bucket = buckets[-1]
             
-            # Lookup
+            # Lookup Logic
             pred_val = None
-            
             def get_val(mode):
-                if mode == "Absolute":
-                    return self._lookup(params['abs_map'], a_seq_key)
+                if mode == "Absolute": return self._lookup(params['abs_map'], a_seq_key)
                 elif mode == "Derivative":
-                    change = self._lookup(params['der_map'], d_seq_key)
-                    if change is not None: return last_bucket + change
+                    chg = self._lookup(params['der_map'], d_seq_key)
+                    return last_bucket + chg if chg is not None else None
                 return None
 
-            if model_type == "Absolute":
-                pred_val = get_val("Absolute")
-            elif model_type == "Derivative":
-                pred_val = get_val("Derivative")
+            if model_type == "Absolute": pred_val = get_val("Absolute")
+            elif model_type == "Derivative": pred_val = get_val("Derivative")
             elif model_type == "Combined":
-                p_abs = get_val("Absolute")
-                p_der = get_val("Derivative")
-                
+                p_abs, p_der = get_val("Absolute"), get_val("Derivative")
                 dir_abs = 0 if p_abs is None else (1 if p_abs > last_bucket else -1 if p_abs < last_bucket else 0)
                 dir_der = 0 if p_der is None else (1 if p_der > last_bucket else -1 if p_der < last_bucket else 0)
                 
-                if dir_abs != 0 and dir_der != 0 and dir_abs == dir_der:
-                    pred_val = p_abs 
-                elif dir_abs != 0 and dir_der == 0:
-                     pred_val = p_abs
-                elif dir_der != 0 and dir_abs == 0:
-                     pred_val = p_der
+                if dir_abs != 0 and dir_der != 0 and dir_abs == dir_der: pred_val = p_abs 
+                elif dir_abs != 0 and dir_der == 0: pred_val = p_abs
+                elif dir_der != 0 and dir_abs == 0: pred_val = p_der
 
             if pred_val is not None:
                 diff = pred_val - last_bucket
                 if diff != 0:
-                    direction = 1 if diff > 0 else -1
-                    est_price = pred_val * b_size
                     active_signals.append({
-                        "dir": direction,
+                        "dir": 1 if diff > 0 else -1,
                         "b_count": b_count,
-                        "est_price": est_price
+                        "est_price": pred_val * b_size
                     })
 
-        if not active_signals:
-            return 0, current_price, "Neutral"
-
+        # Aggregation
+        if not active_signals: return 0, current_price, "Neutral"
+        
         directions = {x['dir'] for x in active_signals}
-        if len(directions) > 1:
-            return 0, current_price, f"Conflict ({len(active_signals)})"
+        if len(directions) > 1: return 0, current_price, f"Conflict ({len(active_signals)})"
             
         active_signals.sort(key=lambda x: x['b_count'])
-        winner = active_signals[0]
-        
-        strength = len(active_signals)
-        return winner['dir'], winner['est_price'], f"Signal ({strength})"
+        return active_signals[0]['dir'], active_signals[0]['est_price'], f"Signal ({len(active_signals)})"
 
 # =========================================
-# 5. MAIN LOOP
+# 4. ASYNC ORCHESTRATOR
+# =========================================
+
+async def fetch_price(session, engine):
+    """Async fetch for a single asset."""
+    url = f"{BINANCE_API_URL}?symbol={engine.asset}&interval={engine.interval}&limit=50"
+    try:
+        async with session.get(url) as response:
+            if response.status == 200:
+                data = await response.json()
+                # Parse close prices: [timestamp, open, high, low, close...]
+                prices = [float(x[4]) for x in data]
+                return engine, prices
+    except Exception as e:
+        pass
+    return engine, []
+
+async def run_bot_loop(engines):
+    print("\n" + "="*60)
+    print(f"🚀 BOT STARTED: {len(engines)} Assets | High-Frequency Mode")
+    print("="*60 + "\n")
+
+    async with aiohttp.ClientSession() as session:
+        while True:
+            # 1. CLOCK SYNC (Wait for next minute :00)
+            now = datetime.now()
+            # Calculate seconds to sleep to hit XX:XX:01 (1s buffer for candle close)
+            # Or XX:XX:00.1 if you are very aggressive.
+            sleep_seconds = 60 - now.second - (now.microsecond / 1_000_000.0) + 0.1
+            if sleep_seconds < 0: sleep_seconds += 60
+            
+            print(f"⏳ Waiting {sleep_seconds:.2f}s for candle close...")
+            await asyncio.sleep(sleep_seconds)
+
+            # 2. START OF MINUTE
+            start_ts = datetime.now()
+            print(f"\n--- ⚡ SCAN: {start_ts.strftime('%H:%M:%S.%f')[:-3]} ---")
+
+            # 3. ASYNC FETCH (All at once)
+            tasks = [fetch_price(session, eng) for eng in engines]
+            results = await asyncio.gather(*tasks)
+            
+            fetch_ts = datetime.now()
+            latency_ms = (fetch_ts - start_ts).total_seconds() * 1000
+            print(f"    Data Recv: {latency_ms:.0f}ms | Processing...")
+
+            # 4. PROCESS SIGNALS
+            signals = []
+            for engine, prices in results:
+                if not prices: continue
+                
+                direction, target, note = engine.predict(prices)
+                
+                if direction != 0:
+                    signals.append((engine.asset, direction, prices[-1], note))
+
+            # 5. OUTPUT
+            if signals:
+                print(f"{'ASSET':<10} {'ACTION':<8} {'PRICE':<10} {'NOTE'}")
+                print("-" * 45)
+                for s in signals:
+                    action = "BUY 🟢" if s[1] == 1 else "SELL 🔴"
+                    print(f"{s[0]:<10} {action:<8} {s[2]:<10.4f} {s[3]}")
+            else:
+                print("    No trade signals this interval.")
+            
+            end_ts = datetime.now()
+            total_ms = (end_ts - start_ts).total_seconds() * 1000
+            print(f"    Done. Total Latency: {total_ms:.0f}ms")
+
+# =========================================
+# 5. MAIN ENTRY POINT
 # =========================================
 
 def main():
-    print("--- MULTI-ASSET MODEL INFERENCE (LARGE FILES) ---")
-    
+    # 1. Sync Load (Heavy lifting)
     loader = ModelLoader(pat=GITHUB_PAT)
-    all_models_data = loader.fetch_all_models()
+    raw_models = loader.fetch_all_models()
     
-    if not all_models_data:
-        print("No models loaded. Exiting.")
+    if not raw_models:
+        print("Exiting: No models found.")
         return
 
-    engines = [InferenceEngine(m) for m in all_models_data]
-    print(f"\n[*] Initialized {len(engines)} engines. Starting Loop...\n")
+    # 2. Prepare Engines
+    engines = [InferenceEngine(m) for m in raw_models]
 
-    print(f"{'ASSET':<10} | {'TF':<5} | {'PRICE':<10} | {'ACTION':<10} | {'NOTE'}")
-    print("-" * 65)
-
-    for engine in engines:
-        prices = get_latest_prices(engine.asset, engine.interval)
-        
-        if len(prices) < 50:
-            print(f"{engine.asset:<10} | {engine.interval:<5} | {'N/A':<10} | ERROR      | No Data")
-            continue
-            
-        direction, target_price, note = engine.predict(prices)
-        current_price = prices[-1]
-        
-        action = "HOLD"
-        if direction == 1: 
-            action = "BUY 🟢"
-        elif direction == -1: 
-            action = "SELL 🔴"
-            
-        print(f"{engine.asset:<10} | {engine.interval:<5} | {current_price:<10.4f} | {action:<10} | {note}")
-        time.sleep(0.1)
+    # 3. Enter Async Loop
+    try:
+        asyncio.run(run_bot_loop(engines))
+    except KeyboardInterrupt:
+        print("\n🛑 Bot stopped by user.")
 
 if __name__ == "__main__":
     main()
