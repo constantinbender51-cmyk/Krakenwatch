@@ -1,7 +1,6 @@
 import os
 import json
 import requests
-import base64
 import urllib.request
 import time
 from datetime import datetime
@@ -19,12 +18,13 @@ except ImportError:
 GITHUB_PAT = os.getenv("PAT")
 REPO_OWNER = "constantinbender51-cmyk"
 REPO_NAME = "model-2"
+# We still use the API to LIST the files
 GITHUB_API_URL = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/"
 
 BINANCE_API_URL = "https://api.binance.com/api/v3/klines"
 
 # =========================================
-# 2. MODEL LOADER (Auto-Discovery)
+# 2. LARGE FILE MODEL LOADER
 # =========================================
 
 class ModelLoader:
@@ -35,27 +35,37 @@ class ModelLoader:
         } if pat else {}
 
     def fetch_all_models(self):
-        """Scans the repo and downloads ALL .json strategy files."""
+        """Scans the repo and downloads ALL .json strategy files via raw download_url."""
         print(f"[*] Scanning repository: {REPO_OWNER}/{REPO_NAME}...")
         
         try:
             r = requests.get(GITHUB_API_URL, headers=self.headers)
             if r.status_code != 200:
                 print(f"[!] Error listing files: Status {r.status_code}")
+                print(f"    Response: {r.text}")
                 return []
                 
             files = r.json()
+            if not isinstance(files, list):
+                print(f"[!] Unexpected API response format: {type(files)}")
+                return []
+
             model_files = [f for f in files if f['name'].endswith('.json')]
             
             if not model_files:
                 print("[!] No JSON model files found in repository.")
                 return []
 
-            print(f"[*] Found {len(model_files)} model files. Downloading...")
+            print(f"[*] Found {len(model_files)} model files. Downloading large files...")
             
             loaded_models = []
             for file_info in model_files:
-                self._download_and_parse(file_info['url'], loaded_models)
+                # USE 'download_url' for files > 1MB
+                raw_url = file_info.get('download_url')
+                if raw_url:
+                    self._download_raw(raw_url, file_info['name'], loaded_models)
+                else:
+                    print(f"    [!] Skipped {file_info['name']} (No download URL)")
                 
             return loaded_models
 
@@ -63,39 +73,40 @@ class ModelLoader:
             print(f"[!] Critical Error during discovery: {e}")
             return []
 
-    def _download_and_parse(self, url, container):
+    def _download_raw(self, url, filename, container):
         try:
-            r = requests.get(url, headers=self.headers)
+            # We pass headers to handle Private Repos authentication on raw URLs
+            r = requests.get(url, headers=self.headers, stream=True)
+            
             if r.status_code == 200:
-                file_content = r.json()
-                decoded = base64.b64decode(file_content['content']).decode('utf-8')
-                data = json.loads(decoded)
+                # For large files, we load directly from the raw text stream
+                # No Base64 decoding needed here because it's the raw file
+                data = r.json()
                 
-                # Basic validation to ensure it's a valid strategy file
                 if 'asset' in data and 'strategies' in data:
+                    size_mb = len(r.content) / (1024 * 1024)
                     container.append(data)
-                    print(f"    -> Loaded: {data['asset']} [{data['interval']}] (Acc: {data.get('holdout_stats', {}).get('accuracy', 0):.1f}%)")
+                    print(f"    -> Loaded: {filename:<20} | {size_mb:.2f} MB | {data['asset']} [{data['interval']}]")
                 else:
-                    print(f"    -> Skipped invalid file (missing keys)")
+                    print(f"    -> Skipped {filename} (Invalid Structure)")
+            else:
+                print(f"    -> Failed {filename}: HTTP {r.status_code}")
+                
         except Exception as e:
-            print(f"    -> Error downloading file: {e}")
+            print(f"    -> Error downloading {filename}: {e}")
 
 # =========================================
 # 3. LIVE DATA UTILS
 # =========================================
 
 def get_latest_prices(symbol, interval, limit=100):
-    # Binance API requires converting "1m" -> "1m", "1h" -> "1h" (Standard)
-    # If your model saves "1min", mapping might be needed. 
-    # Based on training script, interval is saved as "1m", "5m", etc. which works directly.
-    
     url = f"{BINANCE_API_URL}?symbol={symbol}&interval={interval}&limit={limit}"
     try:
         with urllib.request.urlopen(url) as response:
             data = json.loads(response.read().decode())
             return [float(x[4]) for x in data]
     except Exception as e:
-        print(f"[!] Binance Error ({symbol}): {e}")
+        # Reduce noise if just a network blip
         return []
 
 # =========================================
@@ -128,10 +139,8 @@ class InferenceEngine:
             model_type = cfg['model']
             b_size = params['bucket_size']
             
-            # Need enough data
             if len(recent_prices) < s_len + 1: continue
 
-            # Create Sequences
             window = recent_prices[-s_len:]
             buckets = [self._get_bucket(p, b_size) for p in window]
             
@@ -144,10 +153,9 @@ class InferenceEngine:
 
             last_bucket = buckets[-1]
             
-            # Prediction Lookup
+            # Lookup
             pred_val = None
             
-            # Helper
             def get_val(mode):
                 if mode == "Absolute":
                     return self._lookup(params['abs_map'], a_seq_key)
@@ -156,7 +164,6 @@ class InferenceEngine:
                     if change is not None: return last_bucket + change
                 return None
 
-            # Resolve Type
             if model_type == "Absolute":
                 pred_val = get_val("Absolute")
             elif model_type == "Derivative":
@@ -175,7 +182,6 @@ class InferenceEngine:
                 elif dir_der != 0 and dir_abs == 0:
                      pred_val = p_der
 
-            # Generate Signal
             if pred_val is not None:
                 diff = pred_val - last_bucket
                 if diff != 0:
@@ -187,30 +193,26 @@ class InferenceEngine:
                         "est_price": est_price
                     })
 
-        # --- ENSEMBLE LOGIC ---
         if not active_signals:
-            return 0, current_price, "Neutral (No Signals)"
+            return 0, current_price, "Neutral"
 
-        # 1. Consensus Check (Conflict Resolution)
         directions = {x['dir'] for x in active_signals}
         if len(directions) > 1:
-            return 0, current_price, f"Neutral (Conflict: {len(active_signals)} models)"
+            return 0, current_price, f"Conflict ({len(active_signals)})"
             
-        # 2. Selection (Lowest Bucket Count wins)
         active_signals.sort(key=lambda x: x['b_count'])
         winner = active_signals[0]
         
         strength = len(active_signals)
-        return winner['dir'], winner['est_price'], f"Signal Strength: {strength}/{len(self.strategies)}"
+        return winner['dir'], winner['est_price'], f"Signal ({strength})"
 
 # =========================================
 # 5. MAIN LOOP
 # =========================================
 
 def main():
-    print("--- MULTI-ASSET MODEL INFERENCE ---")
+    print("--- MULTI-ASSET MODEL INFERENCE (LARGE FILES) ---")
     
-    # 1. LOAD ALL MODELS
     loader = ModelLoader(pat=GITHUB_PAT)
     all_models_data = loader.fetch_all_models()
     
@@ -218,36 +220,29 @@ def main():
         print("No models loaded. Exiting.")
         return
 
-    # Create engines for each loaded file
     engines = [InferenceEngine(m) for m in all_models_data]
-    print(f"\n[*] Initialized {len(engines)} inference engines.\n")
+    print(f"\n[*] Initialized {len(engines)} engines. Starting Loop...\n")
 
-    # 2. EXECUTE
     print(f"{'ASSET':<10} | {'TF':<5} | {'PRICE':<10} | {'ACTION':<10} | {'NOTE'}")
     print("-" * 65)
 
     for engine in engines:
-        # Fetch live data for this specific asset/interval
         prices = get_latest_prices(engine.asset, engine.interval)
         
         if len(prices) < 50:
-            print(f"{engine.asset:<10} | {engine.interval:<5} | {'N/A':<10} | ERROR      | Insufficient Data")
+            print(f"{engine.asset:<10} | {engine.interval:<5} | {'N/A':<10} | ERROR      | No Data")
             continue
             
         direction, target_price, note = engine.predict(prices)
         current_price = prices[-1]
         
-        # Formatting Output
         action = "HOLD"
-        color = ""
         if direction == 1: 
             action = "BUY 🟢"
         elif direction == -1: 
             action = "SELL 🔴"
             
         print(f"{engine.asset:<10} | {engine.interval:<5} | {current_price:<10.4f} | {action:<10} | {note}")
-        
-        # Respect API Rate Limits slightly
         time.sleep(0.1)
 
 if __name__ == "__main__":
