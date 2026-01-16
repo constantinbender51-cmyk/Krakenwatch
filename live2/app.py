@@ -217,7 +217,7 @@ def resample_data(klines_1m, target_interval):
 def main():
     # 1. Select Asset
     asset = "BTCUSDT"   # <--- CHANGE THIS IF NEEDED
-    interval = "15m"    # <--- CHANGE THIS IF NEEDED (must match a trained file in repo)
+    interval = "1m"    # <--- CHANGE THIS IF NEEDED (must match a trained file in repo)
 
     print(f"--- INITIALIZING BACKTEST FOR {asset} [{interval}] ---")
 
